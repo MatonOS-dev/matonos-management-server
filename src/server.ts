@@ -10,7 +10,7 @@ const CONFIG_PATH = process.env.OTA_CONFIG;
 const FDROID_DIR = process.env.OTA_FDROID_DIR;
 const IMMUTABLE = 'public, max-age=31536000, immutable';
 // F-Droid index files change on every publish; everything else in the repo is versioned by name.
-const FDROID_INDEX_RE = /^(entry\.(jar|json)|index(-v1|-v2)?\.(jar|json|xml)|diff\/.*)$/;
+const FDROID_INDEX_RE = /^(entry\.(jar|json)|index(-v1|-v2)?\.(jar|json|xml|html)|diff\/.*)$/;
 const FDROID_INDEX_CACHE = 'public, max-age=60';
 const MAX_BODY = 64 * 1024;
 const CHANNEL_RE = /^[a-z0-9_]+$/;

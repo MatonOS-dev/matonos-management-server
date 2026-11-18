@@ -84,5 +84,5 @@ manifest verifier.
 ## F-Droid repository
 
 With `OTA_FDROID_DIR` set, `/fdroid/<path>` serves that directory as plain files (byte ranges supported).
-Index files under `repo/` (`entry.*`, `index*.{jar,json,xml}`, `diff/`) get `Cache-Control: public, max-age=60`;
+Index files under `repo/` (`entry.*`, `index*.{jar,json,xml,html}`, `diff/`) get `Cache-Control: public, max-age=60`;
 everything else (APKs, icons) is versioned by name and cached as immutable. Cloudflare follows these headers.
