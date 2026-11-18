@@ -12,6 +12,7 @@ export OTA_STORAGE_DIR=/srv/matonos-ota/storage
 export OTA_CONFIG=/etc/matonos-ota/channels.json
 export OTA_PORT=8080
 export OTA_HOST=127.0.0.1   # default; the server sits behind a reverse proxy
+export OTA_FDROID_DIR=/srv/matonos-ota/fdroid   # optional: serves the MatonOS F-Droid repo at /fdroid/
 node src/server.ts
 ```
 
@@ -79,3 +80,9 @@ Node tests cover all four API endpoints, downgrade filtering and promotion,
 the required add-on gate, fixed EOL response, malformed requests, and byte ranges. The Python test
 checks publisher output and compatibility with the native slot-writer
 manifest verifier.
+
+## F-Droid repository
+
+With `OTA_FDROID_DIR` set, `/fdroid/<path>` serves that directory as plain files (byte ranges supported).
+Index files under `repo/` (`entry.*`, `index*.{jar,json,xml}`, `diff/`) get `Cache-Control: public, max-age=60`;
+everything else (APKs, icons) is versioned by name and cached as immutable. Cloudflare follows these headers.

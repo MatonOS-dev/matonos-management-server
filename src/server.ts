@@ -7,6 +7,11 @@ const PORT = Number(process.env.OTA_PORT ?? '8080');
 const HOST = process.env.OTA_HOST ?? '127.0.0.1';
 const STORAGE_DIR = process.env.OTA_STORAGE_DIR;
 const CONFIG_PATH = process.env.OTA_CONFIG;
+const FDROID_DIR = process.env.OTA_FDROID_DIR;
+const IMMUTABLE = 'public, max-age=31536000, immutable';
+// F-Droid index files change on every publish; everything else in the repo is versioned by name.
+const FDROID_INDEX_RE = /^(entry\.(jar|json)|index(-v1|-v2)?\.(jar|json|xml)|diff\/.*)$/;
+const FDROID_INDEX_CACHE = 'public, max-age=60';
 const MAX_BODY = 64 * 1024;
 const CHANNEL_RE = /^[a-z0-9_]+$/;
 const UPDATE_ID_RE = /^[1-9][0-9]{0,19}$/;
@@ -170,44 +175,59 @@ function contentType(path: string) {
   return extname(path) === '.json' ? 'application/json; charset=utf-8' : 'application/octet-stream';
 }
 
-async function handleStorage(req: any, res: any) {
-  if (req.method !== 'GET' && req.method !== 'HEAD') throw fail(405, 'method_not_allowed', 'Storage endpoints require GET or HEAD');
-  if (!STORAGE_DIR) throw new Error('OTA_STORAGE_DIR is not set');
-  const raw = new URL(req.url ?? '/', 'http://localhost').pathname.slice('/storage/'.length);
+function pathParts(req: any, prefix: string) {
+  if (req.method !== 'GET' && req.method !== 'HEAD') throw fail(405, 'method_not_allowed', 'File endpoints require GET or HEAD');
+  const raw = new URL(req.url ?? '/', 'http://localhost').pathname.slice(prefix.length);
   let decoded: string;
-  try { decoded = decodeURIComponent(raw); } catch { throw fail(400, 'invalid_path', 'Malformed storage path'); }
+  try { decoded = decodeURIComponent(raw); } catch { throw fail(400, 'invalid_path', 'Malformed file path'); }
   const parts = decoded.split('/');
-  if (parts.length < 2 || !UPDATE_ID_RE.test(parts[0]) || parts.slice(1).some((part) => !part || part === '.' || part === '..' || part.includes('\\'))) {
-    throw fail(404, 'not_found', 'Storage file not found');
-  }
-  const path = resolve(STORAGE_DIR, ...parts);
-  const root = await fs.realpath(STORAGE_DIR);
+  if (parts.some((part) => !part || part === '.' || part === '..' || part.includes('\\'))) throw fail(404, 'not_found', 'File not found');
+  return parts;
+}
+
+async function handleStorage(req: any, res: any) {
+  if (!STORAGE_DIR) throw new Error('OTA_STORAGE_DIR is not set');
+  const parts = pathParts(req, '/storage/');
+  if (parts.length < 2 || !UPDATE_ID_RE.test(parts[0])) throw fail(404, 'not_found', 'File not found');
+  return serveFile(req, res, STORAGE_DIR, parts, IMMUTABLE);
+}
+
+async function handleFdroid(req: any, res: any) {
+  if (!FDROID_DIR) throw fail(404, 'not_found', 'No F-Droid repository is configured');
+  const parts = pathParts(req, '/fdroid/');
+  const inRepo = parts[0] === 'repo' ? parts.slice(1).join('/') : '';
+  return serveFile(req, res, FDROID_DIR, parts, FDROID_INDEX_RE.test(inRepo) ? FDROID_INDEX_CACHE : IMMUTABLE);
+}
+
+async function serveFile(req: any, res: any, rootDir: string, parts: string[], cacheControl: string) {
+  const path = resolve(rootDir, ...parts);
+  const root = await fs.realpath(rootDir);
   let canonical: string, stat;
   try {
     canonical = await fs.realpath(path);
     stat = await fs.stat(canonical);
   }
-  catch (error: any) { if (error?.code === 'ENOENT') throw fail(404, 'not_found', 'Storage file not found'); throw error; }
-  if (!canonical.startsWith(root + sep)) throw fail(404, 'not_found', 'Storage file not found');
-  if (!stat.isFile()) throw fail(404, 'not_found', 'Storage file not found');
+  catch (error: any) { if (error?.code === 'ENOENT') throw fail(404, 'not_found', 'File not found'); throw error; }
+  if (!canonical.startsWith(root + sep)) throw fail(404, 'not_found', 'File not found');
+  if (!stat.isFile()) throw fail(404, 'not_found', 'File not found');
   let start = 0, end = stat.size - 1, status = 200;
   const range = req.headers.range;
   if (range !== undefined) {
     const match = /^bytes=(\d*)-(\d*)$/.exec(String(range));
     if (!match || (!match[1] && !match[2]) || stat.size === 0) {
-      res.writeHead(416, { 'Content-Range': `bytes */${stat.size}`, 'Cache-Control': 'public, max-age=31536000, immutable' }); return res.end();
+      res.writeHead(416, { 'Content-Range': `bytes */${stat.size}`, 'Cache-Control': cacheControl }); return res.end();
     }
     if (!match[1]) { const suffix = Number(match[2]); start = Math.max(0, stat.size - suffix); }
     else start = Number(match[1]);
     if (match[2] && match[1]) end = Math.min(Number(match[2]), stat.size - 1);
     if (start >= stat.size || end < start) {
-      res.writeHead(416, { 'Content-Range': `bytes */${stat.size}`, 'Cache-Control': 'public, max-age=31536000, immutable' }); return res.end();
+      res.writeHead(416, { 'Content-Range': `bytes */${stat.size}`, 'Cache-Control': cacheControl }); return res.end();
     }
     status = 206;
   }
   const headers: Record<string, string | number> = {
     'Content-Type': contentType(path), 'Accept-Ranges': 'bytes', 'Content-Length': end - start + 1,
-    'Cache-Control': 'public, max-age=31536000, immutable'
+    'Cache-Control': cacheControl
   };
   if (status === 206) headers['Content-Range'] = `bytes ${start}-${end}/${stat.size}`;
   res.writeHead(status, headers);
@@ -227,6 +247,7 @@ export function createOtaServer() {
       const path = new URL(req.url ?? '/', 'http://localhost').pathname;
       if (path.startsWith('/api/')) await handleApi(req, res);
       else if (path.startsWith('/storage/')) await handleStorage(req, res);
+      else if (path.startsWith('/fdroid/')) await handleFdroid(req, res);
       else throw fail(404, 'not_found', 'Not found');
     } catch (error: any) {
       if (error instanceof HttpError) {

@@ -46,6 +46,10 @@ before(async () => {
   storage = resolve(root, 'storage'); configPath = resolve(root, 'channels.json');
   process.env.OTA_STORAGE_DIR = storage; process.env.OTA_CONFIG = configPath;
   await mkdir(storage);
+  const fdroid = resolve(root, 'fdroid'); process.env.OTA_FDROID_DIR = fdroid;
+  await mkdir(resolve(fdroid, 'repo'), { recursive: true });
+  await writeFile(resolve(fdroid, 'repo', 'index-v2.json'), '{}');
+  await writeFile(resolve(fdroid, 'repo', 'org.example_3.apk'), 'apk');
   await writeUpdate(100, 18, { games: ['runtime.tar.zst', 'locale/en.dat'], editor: ['editor.pkg'] });
   await writeUpdate(101, 18, { games: ['runtime.tar.zst', 'locale/en.dat'], editor: ['editor.pkg'] });
   await writeUpdate(102, 17);
@@ -116,6 +120,17 @@ describe('OTA API', () => {
     assert.equal(response.headers.get('content-range'), 'bytes 1-3/10');
     assert.equal(response.headers.get('cache-control'), 'public, max-age=31536000, immutable');
     assert.equal(await response.text(), 'bme');
+  });
+
+  it('serves the F-Droid repo with short-lived index caching', async () => {
+    const index = await fetch(`${baseUrl}/fdroid/repo/index-v2.json`);
+    assert.equal(index.status, 200);
+    assert.equal(index.headers.get('cache-control'), 'public, max-age=60');
+    const apk = await fetch(`${baseUrl}/fdroid/repo/org.example_3.apk`);
+    assert.equal(apk.headers.get('cache-control'), 'public, max-age=31536000, immutable');
+    assert.equal(await apk.text(), 'apk');
+    assert.equal((await fetch(`${baseUrl}/fdroid/repo/..%2Fsecret`)).status, 404);
+    assert.equal((await fetch(`${baseUrl}/fdroid/repo/missing.apk`)).status, 404);
   });
 
   it('refuses promotion to a lower Android base', () => {
