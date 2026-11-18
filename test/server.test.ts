@@ -126,6 +126,7 @@ describe('OTA API', () => {
     const index = await fetch(`${baseUrl}/fdroid/repo/index-v2.json`);
     assert.equal(index.status, 200);
     assert.equal(index.headers.get('cache-control'), 'public, max-age=60');
+    assert.equal(index.headers.get('cdn-cache-control'), 'max-age=60');
     const apk = await fetch(`${baseUrl}/fdroid/repo/org.example_3.apk`);
     assert.equal(apk.headers.get('cache-control'), 'public, max-age=31536000, immutable');
     assert.equal(await apk.text(), 'apk');

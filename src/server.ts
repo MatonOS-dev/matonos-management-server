@@ -229,6 +229,8 @@ async function serveFile(req: any, res: any, rootDir: string, parts: string[], c
     'Content-Type': contentType(path), 'Accept-Ranges': 'bytes', 'Content-Length': end - start + 1,
     'Cache-Control': cacheControl
   };
+  // Cloudflare's edge honours CDN-Cache-Control; without it a zone Browser Cache TTL can stretch short index caches.
+  if (cacheControl === FDROID_INDEX_CACHE) headers['CDN-Cache-Control'] = 'max-age=60';
   if (status === 206) headers['Content-Range'] = `bytes ${start}-${end}/${stat.size}`;
   res.writeHead(status, headers);
   if (req.method === 'HEAD' || stat.size === 0) return res.end();
