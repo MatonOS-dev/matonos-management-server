@@ -4,6 +4,7 @@ import { basename, extname, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const PORT = Number(process.env.OTA_PORT ?? '8080');
+const HOST = process.env.OTA_HOST ?? '127.0.0.1';
 const STORAGE_DIR = process.env.OTA_STORAGE_DIR;
 const CONFIG_PATH = process.env.OTA_CONFIG;
 const MAX_BODY = 64 * 1024;
@@ -245,5 +246,5 @@ const invoked = process.argv[1] && resolve(process.argv[1]) === fileURLToPath(im
 if (invoked) {
   if (!Number.isInteger(PORT) || PORT < 1 || PORT > 65535) throw new Error('OTA_PORT must be a valid TCP port');
   if (!STORAGE_DIR || !CONFIG_PATH) throw new Error('OTA_STORAGE_DIR and OTA_CONFIG are required');
-  createOtaServer().listen(PORT, '0.0.0.0', () => log('info', 'server_listening', { port: PORT }));
+  createOtaServer().listen(PORT, HOST, () => log('info', 'server_listening', { host: HOST, port: PORT }));
 }

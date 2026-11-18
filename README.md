@@ -11,6 +11,7 @@ for complete endpoint schemas and behavior.
 export OTA_STORAGE_DIR=/srv/matonos-ota/storage
 export OTA_CONFIG=/etc/matonos-ota/channels.json
 export OTA_PORT=8080
+export OTA_HOST=127.0.0.1   # default; the server sits behind a reverse proxy
 node src/server.ts
 ```
 
