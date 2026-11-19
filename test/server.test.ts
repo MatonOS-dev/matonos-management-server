@@ -50,6 +50,10 @@ before(async () => {
   await mkdir(resolve(fdroid, 'repo'), { recursive: true });
   await writeFile(resolve(fdroid, 'repo', 'index-v2.json'), '{}');
   await writeFile(resolve(fdroid, 'repo', 'org.example_3.apk'), 'apk');
+  const download = resolve(root, 'download'); process.env.OTA_DOWNLOAD_DIR = download;
+  await mkdir(resolve(download, 'nested'), { recursive: true });
+  await writeFile(resolve(download, 'matonos-100-x86_64.iso'), 'iso');
+  await writeFile(resolve(download, 'nested', 'x.iso'), 'no');
   await writeUpdate(100, 18, { games: ['runtime.tar.zst', 'locale/en.dat'], editor: ['editor.pkg'] });
   await writeUpdate(101, 18, { games: ['runtime.tar.zst', 'locale/en.dat'], editor: ['editor.pkg'] });
   await writeUpdate(102, 17);
@@ -132,6 +136,16 @@ describe('OTA API', () => {
     assert.equal(await apk.text(), 'apk');
     assert.equal((await fetch(`${baseUrl}/fdroid/repo/..%2Fsecret`)).status, 404);
     assert.equal((await fetch(`${baseUrl}/fdroid/repo/missing.apk`)).status, 404);
+  });
+
+  it('serves installer media as immutable flat files', async () => {
+    const iso = await fetch(`${baseUrl}/download/matonos-100-x86_64.iso`);
+    assert.equal(iso.status, 200);
+    assert.equal(iso.headers.get('cache-control'), 'public, max-age=31536000, immutable');
+    assert.equal(await iso.text(), 'iso');
+    assert.equal((await fetch(`${baseUrl}/download/nested/x.iso`)).status, 404);
+    assert.equal((await fetch(`${baseUrl}/download/..%2Fstorage`)).status, 404);
+    assert.equal((await fetch(`${baseUrl}/download/missing.iso`)).status, 404);
   });
 
   it('refuses promotion to a lower Android base', () => {

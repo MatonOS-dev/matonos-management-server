@@ -81,6 +81,12 @@ the required add-on gate, fixed EOL response, malformed requests, and byte range
 checks publisher output and compatibility with the native slot-writer
 manifest verifier.
 
+## Installer downloads
+
+With `OTA_DOWNLOAD_DIR` set, `/download/<file>` serves the flat files of that directory (no subdirectories,
+byte ranges supported) as immutable. Name every file by update id, e.g. `matonos-<update_id>-x86_64.iso`
+plus `.sha256`, and never replace a file in place.
+
 ## F-Droid repository
 
 With `OTA_FDROID_DIR` set, `/fdroid/<path>` serves that directory as plain files (byte ranges supported).

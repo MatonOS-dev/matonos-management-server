@@ -8,6 +8,8 @@ const HOST = process.env.OTA_HOST ?? '127.0.0.1';
 const STORAGE_DIR = process.env.OTA_STORAGE_DIR;
 const CONFIG_PATH = process.env.OTA_CONFIG;
 const FDROID_DIR = process.env.OTA_FDROID_DIR;
+// Installer media (ISO, raw live image, checksums). Names carry the update id, so they never change.
+const DOWNLOAD_DIR = process.env.OTA_DOWNLOAD_DIR;
 const IMMUTABLE = 'public, max-age=31536000, immutable';
 // F-Droid index files change on every publish; everything else in the repo is versioned by name.
 const FDROID_INDEX_RE = /^(entry\.(jar|json)|index(-v1|-v2)?\.(jar|json|xml|html)|diff\/.*)$/;
@@ -199,6 +201,13 @@ async function handleFdroid(req: any, res: any) {
   return serveFile(req, res, FDROID_DIR, parts, FDROID_INDEX_RE.test(inRepo) ? FDROID_INDEX_CACHE : IMMUTABLE);
 }
 
+async function handleDownload(req: any, res: any) {
+  if (!DOWNLOAD_DIR) throw fail(404, 'not_found', 'No download directory is configured');
+  const parts = pathParts(req, '/download/');
+  if (parts.length !== 1) throw fail(404, 'not_found', 'File not found');
+  return serveFile(req, res, DOWNLOAD_DIR, parts, IMMUTABLE);
+}
+
 async function serveFile(req: any, res: any, rootDir: string, parts: string[], cacheControl: string) {
   const path = resolve(rootDir, ...parts);
   const root = await fs.realpath(rootDir);
@@ -250,6 +259,7 @@ export function createOtaServer() {
       if (path.startsWith('/api/')) await handleApi(req, res);
       else if (path.startsWith('/storage/')) await handleStorage(req, res);
       else if (path.startsWith('/fdroid/')) await handleFdroid(req, res);
+      else if (path.startsWith('/download/')) await handleDownload(req, res);
       else throw fail(404, 'not_found', 'Not found');
     } catch (error: any) {
       if (error instanceof HttpError) {
