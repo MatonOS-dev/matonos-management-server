@@ -3,7 +3,7 @@ import { createHash, randomUUID, randomBytes, scrypt as scryptCb, timingSafeEqua
 import { promisify } from 'node:util';
 import { SignJWT, jwtVerify } from 'jose';
 import { database, jwtSecret } from './database.ts';
-import { spamText } from './abuse.ts';
+import { spamText, textRejected } from './abuse.ts';
 
 const scrypt = promisify(scryptCb);
 const SCRYPT = { N:16384, r:8, p:1, maxmem:64 * 1024 * 1024 };
@@ -128,6 +128,7 @@ export async function handleAccountReviewApi(req: any, res: any, path: string, u
       if (typeof b.username !== 'string' || typeof b.email !== 'string' || typeof b.password !== 'string') fail(400, 'invalid_account', 'Username, e-mail and password are required');
       const username = b.username, email = b.email.trim(), password = b.password;
       if (!USERNAME.test(username)) fail(400, 'invalid_username', 'Username must be 3–32 allowed characters');
+      if (await textRejected(username)) fail(400, 'invalid_username', 'Username contains language that is not allowed');
       if (!EMAIL.test(email) || email.length > 254) fail(400, 'invalid_email', 'E-mail address is invalid');
       if (password.length < 10 || password.length > 1024) fail(400, 'invalid_password', 'Password must be at least 10 characters');
       const id = randomUUID(), record = await passwordRecord(password, id);
@@ -229,7 +230,7 @@ export async function handleAccountReviewApi(req: any, res: any, path: string, u
       const title = b.title, body = b.body;
       if (!Number.isInteger(stars) || stars < 1 || stars > 5) fail(400, 'invalid_stars', 'stars must be an integer from 1 to 5');
       if (title.length > 80 || body.length > 2000 || (!title.trim() && !body.trim())) fail(400, 'invalid_review', 'Review title or body is invalid');
-      if (spamText(title) || spamText(body)) fail(422, 'text_rejected', 'Review text is not allowed');
+      if (spamText(title) || spamText(body) || await textRejected(title) || await textRejected(body)) fail(422, 'text_rejected', 'Review text is not allowed');
       const now = Date.now(); db.prepare('INSERT INTO reviews(app,account_id,stars,title,body,created,updated) VALUES(?,?,?,?,?,?,?) ON CONFLICT(app,account_id) DO UPDATE SET stars=excluded.stars,title=excluded.title,body=excluded.body,updated=excluded.updated').run(app, me.id, stars, title.trim(), body.trim(), now, now);
       return send(req, res, 200, { ok:true });
     }

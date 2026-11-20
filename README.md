@@ -128,9 +128,11 @@ Verification and password-reset mail use `MATON_SERVER_SMTP_URL` and `MATON_SERV
 Without both variables, reset requests return `503 mail_not_configured` and
 accounts remain usable but unverified. Reset and verification tokens are
 single-use and expire after one hour. Review text rejects URLs, e-mail
-addresses, and blank reviews. The previous CC BY 4.0 multilingual word list
-was removed because it is incompatible with GPL-2.0-only; review word
-filtering is currently omitted.
+addresses, blank reviews, and English profanities. Usernames use the same
+English word filter. Matching normalizes Unicode and checks complete words
+and phrases to avoid common substring false positives. See `src/data/README.md`
+for the pinned word list and licensing details; other languages are not yet
+filtered.
 
 ## Third-party
 
@@ -138,8 +140,8 @@ filtering is currently omitted.
 | --- | --- |
 | `jose` 6.2.18 (runtime) | MIT |
 | `nodemailer` 10.6.0 (runtime) | MIT-0 |
-| Bundled data files | None |
-| LDNOOBW multilingual word list (removed) | CC BY 4.0; incompatible with GPL-2.0-only, no longer distributed |
+| `washyourmouthoutwithsoap` English source words (147 entries; pinned commit in `src/data/README.md`) | MIT; source LICENSE included in `src/data/` |
+| LDNOOBW multilingual word list (not used) | CC BY 4.0; incompatible with GPL-2.0-only |
 | Node.js 24 runtime and built-in test modules | MIT |
 
 The runtime dependency graph is fully represented by these two entries in `package-lock.json`; both licenses are GPLv2-compatible.

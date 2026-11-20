@@ -202,8 +202,10 @@ describe('OTA API', () => {
     const cookie = registered.headers.get('set-cookie')!.split(';')[0];
     const authHeaders = { ...headers, cookie };
     assert.equal((await request('/api/reviews/apps/org.example.app', { stars:5, title:'Great app', body:'Works well on my PC.' }, authHeaders)).status, 200);
-    const unfiltered = await request('/api/reviews/apps/org.example.app', { stars:5, title:'f.u.c.k', body:'word list filtering was removed for GPLv2 compatibility' }, authHeaders);
-    assert.equal(unfiltered.status, 200);
+    const filtered = await request('/api/reviews/apps/org.example.app', { stars:5, title:'f.u.c.k', body:'A clear review.' }, authHeaders);
+    assert.equal(filtered.status, 422);
+    assert.equal((await request('/api/reviews/apps/org.example.app', { stars:5, title:'A clear title', body:'This is shit.' }, authHeaders)).status, 422);
+    assert.equal((await request('/api/reviews/apps/org.example.app', { stars:5, title:'A classic app', body:'Assessment in Scunthorpe was excellent.' }, authHeaders)).status, 200);
     assert.equal((await request('/api/reviews/apps/org.example.app', { stars:5, title:'See https://example.org', body:'review' }, authHeaders)).status, 422);
     assert.equal((await fetch(`${baseUrl}/api/reviews/apps/org.example.app`)).status, 200);
     const listed = await (await fetch(`${baseUrl}/api/reviews/apps/org.example.app`)).json();
@@ -263,11 +265,17 @@ describe('OTA API', () => {
     assert.equal((await response.json()).error, 'mail_not_configured');
   });
 
-  it('rejects review links while leaving word filtering omitted', async () => {
-    const { spamText } = await import('../src/abuse.ts');
+  it('rejects links and English profanity while avoiding substring false positives', async () => {
+    const { spamText, textRejected } = await import('../src/abuse.ts');
     assert.equal(spamText('See https://example.org'), true);
     assert.equal(spamText('mail me at a@example.org'), true);
     assert.equal(spamText('A useful review without a link.'), false);
+    assert.equal(await textRejected('classic'), false);
+    assert.equal(await textRejected('Scunthorpe'), false);
+    assert.equal(await textRejected('assessment'), false);
+    assert.equal(await textRejected('That was fucking awful.'), true);
+    assert.equal(await textRejected('you are a bastard'), true);
+    assert.equal((await request('/api/account/register', { username:'Fuck_User', email:'filtered@example.org', password:'a-long-password-5' }, {'x-maton-machine-id':'filtered-machine'})).status, 400);
   });
 
   it('issues one-hour access JWTs and rotates month-long refresh tokens with stable device identity', async () => {
