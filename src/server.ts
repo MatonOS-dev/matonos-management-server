@@ -23,6 +23,8 @@ const UPDATE_ID_RE = /^[1-9][0-9]{0,19}$/;
 const PACKAGE_RE = /^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)+$/;
 const FSTATS_FILE = 'fdroid-stats.json';
 const FSTATS_SALT_FILE = 'fdroid-stats.salt';
+const RATINGS_FILE = 'ratings.json';
+const APP_KEY_RE = /^[A-Za-z0-9][A-Za-z0-9._+-]{0,254}$/;
 const statsRate = new Map<string, { start: number; count: number }>();
 let statsQueue = Promise.resolve();
 
@@ -155,8 +157,8 @@ async function statsSecrets() {
 }
 
 async function readStats() {
-  try { return JSON.parse(await fs.readFile(resolve(STORAGE_DIR!, FSTATS_FILE), 'utf8')); }
-  catch (error: any) { if (error?.code === 'ENOENT') return { downloads: {}, ratings: {} }; throw error; }
+  try { const stored = JSON.parse(await fs.readFile(resolve(STORAGE_DIR!, FSTATS_FILE), 'utf8')); return { downloads: stored.downloads ?? {} }; }
+  catch (error: any) { if (error?.code === 'ENOENT') return { downloads: {} }; throw error; }
 }
 
 async function writeStats(stats: any) {
@@ -188,30 +190,81 @@ async function handleFdroidApi(req: any, res: any) {
       catch { throw fail(400, 'invalid_package_name', 'packageName is not valid URL encoding'); }
     }
     if (requested !== null) packageName(requested);
-    const stats = await readStats(), apps = new Set([...Object.keys(stats.downloads), ...Object.keys(stats.ratings)]);
+    const stats = await readStats(), apps = new Set(Object.keys(stats.downloads));
     const output: any = {};
     for (const name of apps) {
-      const values = Object.values(stats.ratings[name] ?? {}) as number[];
-      const histogram = [1, 2, 3, 4, 5].map((stars) => values.filter((value) => value === stars).length);
-      output[name] = { downloads: Object.keys(stats.downloads[name] ?? {}).length, ratingCount: values.length,
-        ratingAvg: values.length ? values.reduce((sum, value) => sum + value, 0) / values.length : 0, ratingHistogram: histogram };
+      output[name] = { downloads: Object.keys(stats.downloads[name] ?? {}).length };
     }
-    const result = requested === null ? output : (output[requested] ?? { downloads: 0, ratingCount: 0, ratingAvg: 0, ratingHistogram: [0, 0, 0, 0, 0] });
+    const result = requested === null ? output : (output[requested] ?? { downloads: 0 });
     const body = Buffer.from(`${JSON.stringify(result)}\n`), etag = `"${createHash('sha256').update(body).digest('hex')}"`;
     res.writeHead(req.headers['if-none-match'] === etag ? 304 : 200, { 'Content-Type': 'application/json; charset=utf-8', 'Content-Length': req.headers['if-none-match'] === etag ? 0 : body.length, ETag: etag, 'Cache-Control': 'public, max-age=3600' });
     return res.end(req.headers['if-none-match'] === etag ? undefined : body);
   }
-  if (pathname !== '/api/fdroid/install' && pathname !== '/api/fdroid/rating') throw fail(404, 'not_found', 'F-Droid API endpoint not found');
+  if (pathname !== '/api/fdroid/install') throw fail(404, 'not_found', 'F-Droid API endpoint not found');
   if (req.method !== 'POST') throw fail(405, 'method_not_allowed', 'F-Droid event endpoints require POST');
   const body = await requestBody(req), app = packageName((body as any)?.packageName);
-  if (pathname.endsWith('/rating') && (!Number.isInteger((body as any)?.stars) || (body as any).stars < 1 || (body as any).stars > 5)) throw fail(400, 'invalid_stars', 'stars must be an integer from 1 to 5');
   if (pathname.endsWith('/install') && (body as any)?.versionCode !== undefined && (!Number.isSafeInteger((body as any).versionCode) || (body as any).versionCode < 0)) throw fail(400, 'invalid_version_code', 'versionCode must be a nonnegative integer');
   const salt = await statsSecrets(), hash = clientHash(req, salt); rateStats(hash);
   const update = statsQueue.catch(() => {}).then(async () => {
     const stats = await readStats();
     if (pathname.endsWith('/install')) { stats.downloads[app] ??= {}; stats.downloads[app][hash] = true; }
-    else { stats.ratings[app] ??= {}; stats.ratings[app][hash] = (body as any).stars; }
+
     await writeStats(stats);
+  });
+  statsQueue = update;
+  await update;
+  return json(res, 200, { ok: true });
+}
+
+function appKey(value: unknown): string {
+  if (typeof value !== 'string' || value.length > 255 || !APP_KEY_RE.test(value)) throw fail(400, 'invalid_app', 'app must be a 1–255 character app key');
+  return value;
+}
+
+async function readRatings() {
+  try { return JSON.parse(await fs.readFile(resolve(STORAGE_DIR!, RATINGS_FILE), 'utf8')); }
+  catch (error: any) { if (error?.code === 'ENOENT') return {}; throw error; }
+}
+
+async function writeRatings(ratings: any) {
+  const path = resolve(STORAGE_DIR!, RATINGS_FILE), temp = `${path}.${process.pid}.tmp`;
+  await fs.writeFile(temp, `${JSON.stringify(ratings)}\n`, { mode: 0o600 });
+  await fs.rename(temp, path);
+}
+
+function ratingSummary(values: number[]) {
+  const histogram = [1, 2, 3, 4, 5].map((stars) => values.filter((value) => value === stars).length);
+  return { count: values.length, avg: values.length ? values.reduce((sum, value) => sum + value, 0) / values.length : 0, histogram };
+}
+
+async function handleRatingsApi(req: any, res: any) {
+  const url = new URL(req.url ?? '/', 'http://localhost');
+  const pathname = url.pathname;
+  if (pathname === '/api/ratings' && req.method === 'GET') {
+    const query = url.searchParams.get('apps');
+    if (query === null) throw fail(400, 'missing_apps', 'apps query parameter is required');
+    const keys = query === '' ? [] : query.split(',').map(appKey);
+    if (keys.length > 100) throw fail(400, 'too_many_apps', 'At most 100 app keys may be requested');
+    const ratings = await readRatings(), result: Record<string, ReturnType<typeof ratingSummary>> = {};
+    for (const key of keys) result[key] = ratingSummary(Object.values(ratings[key] ?? {}) as number[]);
+    return json(res, 200, result);
+  }
+  if (pathname.startsWith('/api/ratings/')) {
+    let key: string;
+    try { key = appKey(decodeURIComponent(pathname.slice('/api/ratings/'.length))); }
+    catch (error) { if (error instanceof URIError) throw fail(400, 'invalid_app', 'app key is not valid URL encoding'); throw error; }
+    if (req.method !== 'GET') throw fail(405, 'method_not_allowed', 'Rating lookup requires GET');
+    const ratings = await readRatings();
+    return json(res, 200, ratingSummary(Object.values(ratings[key] ?? {}) as number[]));
+  }
+  if (pathname !== '/api/ratings' || req.method !== 'POST') throw fail(404, 'not_found', 'Ratings API endpoint not found');
+  const body = await requestBody(req), key = appKey((body as any)?.app), stars = (body as any)?.stars;
+  if (!Number.isInteger(stars) || stars < 1 || stars > 5) throw fail(400, 'invalid_stars', 'stars must be an integer from 1 to 5');
+  const hash = clientHash(req, await statsSecrets()); rateStats(hash);
+  const update = statsQueue.catch(() => {}).then(async () => {
+    const ratings = await readRatings();
+    ratings[key] ??= {}; ratings[key][hash] = stars;
+    await writeRatings(ratings);
   });
   statsQueue = update;
   await update;
@@ -351,6 +404,7 @@ export function createOtaServer() {
     try {
       const path = new URL(req.url ?? '/', 'http://localhost').pathname;
       if (path.startsWith('/api/fdroid/')) await handleFdroidApi(req, res);
+      else if (path === '/api/ratings' || path.startsWith('/api/ratings/')) await handleRatingsApi(req, res);
       else if (path.startsWith('/api/')) await handleApi(req, res);
       else if (path.startsWith('/storage/')) await handleStorage(req, res);
       else if (path.startsWith('/fdroid/')) await handleFdroid(req, res);

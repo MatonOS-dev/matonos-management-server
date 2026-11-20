@@ -93,19 +93,27 @@ With `OTA_FDROID_DIR` set, `/fdroid/<path>` serves that directory as plain files
 Index files under `repo/` (`entry.*`, `index*.{jar,json,xml,html}`, `diff/`) get `Cache-Control: public, max-age=60`;
 everything else (APKs, icons) is versioned by name and cached as immutable. Cloudflare follows these headers.
 
-## F-Droid statistics
+## Ratings and F-Droid statistics
 
-The plugin reports successful installs to `POST /api/fdroid/install` when its
-`share_stats` setting is enabled. A client address is the TCP socket peer;
-this server has no trusted-proxy configuration, so reverse-proxy deployments
-will currently see the proxy address. Counts deduplicate by app and a salted
-SHA-256 hash of that address. Ratings use `POST /api/fdroid/rating` and keep
-the latest 1–5 star value per app and address. `GET /api/fdroid/stats` returns
-all apps; `GET /api/fdroid/stats/<packageName>` returns one. Responses use an
-ETag and one-hour public cache lifetime. Bodies are limited to 64 KiB and
-event requests are limited to 60/minute per hashed address.
+The store owns ratings for every source. It submits `POST /api/ratings` with
+`{ "app": "<store app key>", "stars": 1 }`; each salted client hash may
+replace its rating. `GET /api/ratings/<app>` returns `{ count, avg, histogram }`;
+`GET /api/ratings?apps=a,b` returns those summaries keyed by app key. Unknown
+keys have count and average zero with a five-bin zero histogram. The generic
+API uses the same salted client hash and `OTA_TRUST_PROXY` handling as F-Droid
+stats. The store app key uses `packageName || id`; Flatpak refs are normalized from
+`app/<app-id>/<arch>/<branch>` to `<app-id>`, excluding architecture, branch,
+and repository details.
 
-State lives in `OTA_STORAGE_DIR/fdroid-stats.json`; the random 32-byte salt
-lives in `OTA_STORAGE_DIR/fdroid-stats.salt` with mode 0600. The JSON state is
-rewritten atomically. Back up both files together if stats must survive a
-server migration. No raw IP address or device identifier is persisted.
+The F-Droid plugin reports successful installs to `POST /api/fdroid/install`
+when its `share_stats` setting is enabled. Downloads deduplicate by app and a
+salted SHA-256 hash of the client address. `GET /api/fdroid/stats` returns
+all apps' download counts; `GET /api/fdroid/stats/<packageName>` returns one.
+Responses use an ETag and one-hour public cache lifetime. Bodies are limited
+to 64 KiB and event requests are limited to 60/minute per hashed address.
+
+Ratings live in `OTA_STORAGE_DIR/ratings.json`; downloads live in
+`OTA_STORAGE_DIR/fdroid-stats.json`; their shared random 32-byte salt lives in
+`OTA_STORAGE_DIR/fdroid-stats.salt`, mode 0600. Both JSON files are rewritten
+atomically. Back up all three together if state must survive a server
+migration. No raw IP address or device identifier is persisted.

@@ -157,24 +157,31 @@ describe('OTA API', () => {
     assert.equal((await stats.json()).downloads, 2);
   });
 
-  it('deduplicates installs and keeps the latest per-IP rating with cache validators', async () => {
-    const post = (endpoint: string, value: unknown) => request(endpoint, value);
-    assert.equal((await post('/api/fdroid/install', { packageName: 'org.example.app', versionCode: 4 })).status, 200);
+  it('keeps downloads separate and stores generic ratings by salted client hash', async () => {
+    const post = (endpoint: string, value: unknown, ip = '198.51.100.7') => request(endpoint, value, { 'x-real-ip': ip });
+    await post('/api/fdroid/install', { packageName: 'org.example.app', versionCode: 4 });
     await post('/api/fdroid/install', { packageName: 'org.example.app' });
-    await post('/api/fdroid/rating', { packageName: 'org.example.app', stars: 2 });
-    await post('/api/fdroid/rating', { packageName: 'org.example.app', stars: 5 });
+    assert.equal((await post('/api/ratings', { app: 'org.example.app', stars: 2 })).status, 200);
+    await post('/api/ratings', { app: 'org.example.app', stars: 5 });
+    await post('/api/ratings', { app: 'org.example.app', stars: 3 }, '198.51.100.8');
+    const one = await fetch(`${baseUrl}/api/ratings/org.example.app`);
+    assert.deepEqual(await one.json(), { count: 2, avg: 4, histogram: [0, 0, 1, 0, 1] });
+    const batch = await fetch(`${baseUrl}/api/ratings?apps=org.example.app,org.example.other`);
+    assert.deepEqual(await batch.json(), {
+      'org.example.app': { count: 2, avg: 4, histogram: [0, 0, 1, 0, 1] },
+      'org.example.other': { count: 0, avg: 0, histogram: [0, 0, 0, 0, 0] }
+    });
     const stats = await fetch(`${baseUrl}/api/fdroid/stats/org.example.app`);
-    assert.deepEqual(await stats.json(), { downloads: 1, ratingCount: 1, ratingAvg: 5, ratingHistogram: [0, 0, 0, 0, 1] });
-    assert.match(stats.headers.get('etag') ?? '', /^"[a-f0-9]+"$/);
-    assert.match(stats.headers.get('cache-control') ?? '', /max-age/);
-    const cached = await fetch(`${baseUrl}/api/fdroid/stats/org.example.app`, { headers: { 'if-none-match': stats.headers.get('etag')! } });
-    assert.equal(cached.status, 304);
+    assert.deepEqual(await stats.json(), { downloads: 1 });
+    assert.equal((await readFile(resolve(root, 'storage', 'ratings.json'), 'utf8')).includes('198.51.100'), false);
     assert.equal((await readFile(resolve(root, 'storage', 'fdroid-stats.salt'), 'utf8')).length, 64);
   });
 
-  it('validates F-Droid event payloads', async () => {
-    assert.equal((await request('/api/fdroid/install', { packageName: 'bad' })).status, 400);
-    assert.equal((await request('/api/fdroid/rating', { packageName: 'org.example.app', stars: 6 })).status, 400);
+  it('validates generic rating payloads and app keys', async () => {
+    assert.equal((await request('/api/ratings', { app: 'bad key', stars: 4 })).status, 400);
+    assert.equal((await request('/api/ratings', { app: 'org.example.app', stars: 6 })).status, 400);
+    assert.equal((await fetch(`${baseUrl}/api/ratings?apps=bad%20key`)).status, 400);
+    assert.equal((await request('/api/fdroid/rating', { packageName: 'org.example.app', stars: 4 })).status, 404);
   });
 
   it('refuses promotion to a lower Android base', () => {
