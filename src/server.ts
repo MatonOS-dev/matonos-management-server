@@ -1,5 +1,6 @@
 import { createReadStream, promises as fs } from 'node:fs';
 import { createServer } from 'node:http';
+import { createHash, randomBytes } from 'node:crypto';
 import { basename, extname, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -17,6 +18,11 @@ const FDROID_INDEX_CACHE = 'public, max-age=60';
 const MAX_BODY = 64 * 1024;
 const CHANNEL_RE = /^[a-z0-9_]+$/;
 const UPDATE_ID_RE = /^[1-9][0-9]{0,19}$/;
+const PACKAGE_RE = /^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)+$/;
+const FSTATS_FILE = 'fdroid-stats.json';
+const FSTATS_SALT_FILE = 'fdroid-stats.salt';
+const statsRate = new Map<string, { start: number; count: number }>();
+let statsQueue = Promise.resolve();
 
 function log(level: string, event: string, fields: Record<string, unknown> = {}) {
   process.stderr.write(`${JSON.stringify({ time: new Date().toISOString(), level, event, ...fields })}\n`);
@@ -122,6 +128,89 @@ async function requestBody(req: any): Promise<unknown> {
   }
   try { return JSON.parse(Buffer.concat(chunks).toString('utf8')); }
   catch { throw fail(400, 'malformed_json', 'Request body is not valid JSON'); }
+}
+
+function clientHash(req: any, salt: string) {
+  // No trusted-proxy option exists on this server. Deliberately use the socket peer.
+  const address = String(req.socket?.remoteAddress ?? 'unknown');
+  return createHash('sha256').update(salt).update('\0').update(address).digest('hex');
+}
+
+async function statsSecrets() {
+  if (!STORAGE_DIR) throw new Error('OTA_STORAGE_DIR is not set');
+  await fs.mkdir(STORAGE_DIR, { recursive: true });
+  const path = resolve(STORAGE_DIR, FSTATS_SALT_FILE);
+  try { return await fs.readFile(path, 'utf8'); }
+  catch (error: any) {
+    if (error?.code !== 'ENOENT') throw error;
+    const salt = randomBytes(32).toString('hex');
+    try { await fs.writeFile(path, salt, { flag: 'wx', mode: 0o600 }); return salt; }
+    catch (writeError: any) { if (writeError?.code === 'EEXIST') return await fs.readFile(path, 'utf8'); throw writeError; }
+  }
+}
+
+async function readStats() {
+  try { return JSON.parse(await fs.readFile(resolve(STORAGE_DIR!, FSTATS_FILE), 'utf8')); }
+  catch (error: any) { if (error?.code === 'ENOENT') return { downloads: {}, ratings: {} }; throw error; }
+}
+
+async function writeStats(stats: any) {
+  const path = resolve(STORAGE_DIR!, FSTATS_FILE), temp = `${path}.${process.pid}.tmp`;
+  await fs.writeFile(temp, `${JSON.stringify(stats)}\n`, { mode: 0o600 });
+  await fs.rename(temp, path);
+}
+
+function packageName(value: unknown) {
+  if (typeof value !== 'string' || value.length > 255 || !PACKAGE_RE.test(value)) throw fail(400, 'invalid_package_name', 'packageName must be a valid Android package name');
+  return value;
+}
+
+function rateStats(hash: string) {
+  const now = Date.now(), old = statsRate.get(hash);
+  if (statsRate.size > 10_000) for (const [key, value] of statsRate) { if (now - value.start >= 60_000) statsRate.delete(key); if (statsRate.size <= 10_000) break; }
+  if (!old || now - old.start >= 60_000) { statsRate.set(hash, { start: now, count: 1 }); return; }
+  if (old.count >= 60) throw fail(429, 'rate_limited', 'Too many stats requests');
+  old.count++;
+}
+
+async function handleFdroidApi(req: any, res: any) {
+  const pathname = new URL(req.url ?? '/', 'http://localhost').pathname;
+  if (pathname === '/api/fdroid/stats' || pathname.startsWith('/api/fdroid/stats/')) {
+    if (req.method !== 'GET') throw fail(405, 'method_not_allowed', 'Stats endpoint requires GET');
+    let requested: string | null = null;
+    if (pathname !== '/api/fdroid/stats') {
+      try { requested = decodeURIComponent(pathname.slice('/api/fdroid/stats/'.length)); }
+      catch { throw fail(400, 'invalid_package_name', 'packageName is not valid URL encoding'); }
+    }
+    if (requested !== null) packageName(requested);
+    const stats = await readStats(), apps = new Set([...Object.keys(stats.downloads), ...Object.keys(stats.ratings)]);
+    const output: any = {};
+    for (const name of apps) {
+      const values = Object.values(stats.ratings[name] ?? {}) as number[];
+      const histogram = [1, 2, 3, 4, 5].map((stars) => values.filter((value) => value === stars).length);
+      output[name] = { downloads: Object.keys(stats.downloads[name] ?? {}).length, ratingCount: values.length,
+        ratingAvg: values.length ? values.reduce((sum, value) => sum + value, 0) / values.length : 0, ratingHistogram: histogram };
+    }
+    const result = requested === null ? output : (output[requested] ?? { downloads: 0, ratingCount: 0, ratingAvg: 0, ratingHistogram: [0, 0, 0, 0, 0] });
+    const body = Buffer.from(`${JSON.stringify(result)}\n`), etag = `"${createHash('sha256').update(body).digest('hex')}"`;
+    res.writeHead(req.headers['if-none-match'] === etag ? 304 : 200, { 'Content-Type': 'application/json; charset=utf-8', 'Content-Length': req.headers['if-none-match'] === etag ? 0 : body.length, ETag: etag, 'Cache-Control': 'public, max-age=3600' });
+    return res.end(req.headers['if-none-match'] === etag ? undefined : body);
+  }
+  if (pathname !== '/api/fdroid/install' && pathname !== '/api/fdroid/rating') throw fail(404, 'not_found', 'F-Droid API endpoint not found');
+  if (req.method !== 'POST') throw fail(405, 'method_not_allowed', 'F-Droid event endpoints require POST');
+  const body = await requestBody(req), app = packageName((body as any)?.packageName);
+  if (pathname.endsWith('/rating') && (!Number.isInteger((body as any)?.stars) || (body as any).stars < 1 || (body as any).stars > 5)) throw fail(400, 'invalid_stars', 'stars must be an integer from 1 to 5');
+  if (pathname.endsWith('/install') && (body as any)?.versionCode !== undefined && (!Number.isSafeInteger((body as any).versionCode) || (body as any).versionCode < 0)) throw fail(400, 'invalid_version_code', 'versionCode must be a nonnegative integer');
+  const salt = await statsSecrets(), hash = clientHash(req, salt); rateStats(hash);
+  const update = statsQueue.catch(() => {}).then(async () => {
+    const stats = await readStats();
+    if (pathname.endsWith('/install')) { stats.downloads[app] ??= {}; stats.downloads[app][hash] = true; }
+    else { stats.ratings[app] ??= {}; stats.ratings[app][hash] = (body as any).stars; }
+    await writeStats(stats);
+  });
+  statsQueue = update;
+  await update;
+  return json(res, 200, { ok: true });
 }
 
 async function handleApi(req: any, res: any) {
@@ -256,7 +345,8 @@ export function createOtaServer() {
   return createServer(async (req, res) => {
     try {
       const path = new URL(req.url ?? '/', 'http://localhost').pathname;
-      if (path.startsWith('/api/')) await handleApi(req, res);
+      if (path.startsWith('/api/fdroid/')) await handleFdroidApi(req, res);
+      else if (path.startsWith('/api/')) await handleApi(req, res);
       else if (path.startsWith('/storage/')) await handleStorage(req, res);
       else if (path.startsWith('/fdroid/')) await handleFdroid(req, res);
       else if (path.startsWith('/download/')) await handleDownload(req, res);

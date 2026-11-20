@@ -92,3 +92,20 @@ plus `.sha256`, and never replace a file in place.
 With `OTA_FDROID_DIR` set, `/fdroid/<path>` serves that directory as plain files (byte ranges supported).
 Index files under `repo/` (`entry.*`, `index*.{jar,json,xml,html}`, `diff/`) get `Cache-Control: public, max-age=60`;
 everything else (APKs, icons) is versioned by name and cached as immutable. Cloudflare follows these headers.
+
+## F-Droid statistics
+
+The plugin reports successful installs to `POST /api/fdroid/install` when its
+`share_stats` setting is enabled. A client address is the TCP socket peer;
+this server has no trusted-proxy configuration, so reverse-proxy deployments
+will currently see the proxy address. Counts deduplicate by app and a salted
+SHA-256 hash of that address. Ratings use `POST /api/fdroid/rating` and keep
+the latest 1–5 star value per app and address. `GET /api/fdroid/stats` returns
+all apps; `GET /api/fdroid/stats/<packageName>` returns one. Responses use an
+ETag and one-hour public cache lifetime. Bodies are limited to 64 KiB and
+event requests are limited to 60/minute per hashed address.
+
+State lives in `OTA_STORAGE_DIR/fdroid-stats.json`; the random 32-byte salt
+lives in `OTA_STORAGE_DIR/fdroid-stats.salt` with mode 0600. The JSON state is
+rewritten atomically. Back up both files together if stats must survive a
+server migration. No raw IP address or device identifier is persisted.

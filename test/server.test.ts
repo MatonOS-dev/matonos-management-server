@@ -148,6 +148,26 @@ describe('OTA API', () => {
     assert.equal((await fetch(`${baseUrl}/download/missing.iso`)).status, 404);
   });
 
+  it('deduplicates installs and keeps the latest per-IP rating with cache validators', async () => {
+    const post = (endpoint: string, value: unknown) => request(endpoint, value);
+    assert.equal((await post('/api/fdroid/install', { packageName: 'org.example.app', versionCode: 4 })).status, 200);
+    await post('/api/fdroid/install', { packageName: 'org.example.app' });
+    await post('/api/fdroid/rating', { packageName: 'org.example.app', stars: 2 });
+    await post('/api/fdroid/rating', { packageName: 'org.example.app', stars: 5 });
+    const stats = await fetch(`${baseUrl}/api/fdroid/stats/org.example.app`);
+    assert.deepEqual(await stats.json(), { downloads: 1, ratingCount: 1, ratingAvg: 5, ratingHistogram: [0, 0, 0, 0, 1] });
+    assert.match(stats.headers.get('etag') ?? '', /^"[a-f0-9]+"$/);
+    assert.match(stats.headers.get('cache-control') ?? '', /max-age/);
+    const cached = await fetch(`${baseUrl}/api/fdroid/stats/org.example.app`, { headers: { 'if-none-match': stats.headers.get('etag')! } });
+    assert.equal(cached.status, 304);
+    assert.equal((await readFile(resolve(root, 'storage', 'fdroid-stats.salt'), 'utf8')).length, 64);
+  });
+
+  it('validates F-Droid event payloads', async () => {
+    assert.equal((await request('/api/fdroid/install', { packageName: 'bad' })).status, 400);
+    assert.equal((await request('/api/fdroid/rating', { packageName: 'org.example.app', stars: 6 })).status, 400);
+  });
+
   it('refuses promotion to a lower Android base', () => {
     const source = new URL('../src/promote.ts', import.meta.url);
     const result = spawnSync(process.execPath, [source.pathname, 'testing', '102'], {
