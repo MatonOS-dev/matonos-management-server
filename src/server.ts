@@ -4,7 +4,7 @@ import { createServer } from 'node:http';
 import { createHash, randomBytes } from 'node:crypto';
 import { basename, extname, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { database, jwtSecret } from './database.ts';
+import { database, dataDir, jwtSecret } from './database.ts';
 import { handleAccountReviewApi } from './accounts.ts';
 
 const PORT = Number(process.env.MATON_SERVER_PORT ?? '8080');
@@ -142,9 +142,9 @@ export function clientHash(req: any, salt: string) {
 }
 
 export async function statsSecrets() {
-  if (!STORAGE_DIR) throw new Error('MATON_SERVER_STORAGE_DIR is not set');
-  await fs.mkdir(STORAGE_DIR, { recursive: true });
-  const path = resolve(STORAGE_DIR, FSTATS_SALT_FILE);
+  const dir = dataDir();
+  await fs.mkdir(dir, { recursive: true, mode: 0o700 });
+  const path = resolve(dir, FSTATS_SALT_FILE);
   try { return await fs.readFile(path, 'utf8'); }
   catch (error: any) {
     if (error?.code !== 'ENOENT') throw error;
@@ -368,7 +368,7 @@ export function createOtaServer() {
 const invoked = process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url);
 if (invoked) {
   if (!Number.isInteger(PORT) || PORT < 1 || PORT > 65535) throw new Error('MATON_SERVER_PORT must be a valid TCP port');
-  if (!STORAGE_DIR || !CONFIG_PATH) throw new Error('MATON_SERVER_STORAGE_DIR and MATON_SERVER_CONFIG are required');
+  if (!STORAGE_DIR || !CONFIG_PATH || !process.env.MATON_SERVER_DATA_DIR) throw new Error('MATON_SERVER_STORAGE_DIR, MATON_SERVER_DATA_DIR and MATON_SERVER_CONFIG are required');
   database().then(() => jwtSecret()).then(() => {
     createOtaServer().listen(PORT, HOST, () => log('info', 'server_listening', { host: HOST, port: PORT }));
   }).catch((error) => {

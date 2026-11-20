@@ -41,11 +41,17 @@ export function applyMigrations(connection:DatabaseSync, steps:string[] = migrat
   }
 }
 
+// Private state (database, JWT secret, stats salt). Never a served directory.
+export function dataDir() {
+  const dir = process.env.MATON_SERVER_DATA_DIR;
+  if (!dir) throw new Error('MATON_SERVER_DATA_DIR is not set');
+  return dir;
+}
+
 let db: DatabaseSync | undefined;
 export async function database() {
   if (db) return db;
-  const dir = process.env.MATON_SERVER_STORAGE_DIR;
-  if (!dir) throw new Error('MATON_SERVER_STORAGE_DIR is not set');
+  const dir = dataDir();
   process.umask(0o077);
   await mkdir(dir, { recursive: true, mode: 0o700 });
   const path = resolve(dir, 'maton.db');
@@ -61,8 +67,7 @@ export async function database() {
 }
 
 export async function jwtSecret() {
-  const dir = process.env.MATON_SERVER_STORAGE_DIR;
-  if (!dir) throw new Error('MATON_SERVER_STORAGE_DIR is not set');
+  const dir = dataDir();
   const path = resolve(dir, 'jwt.secret');
   try {
     await chmod(path, 0o600);

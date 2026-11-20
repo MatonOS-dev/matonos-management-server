@@ -45,7 +45,7 @@ const payload = (values: Record<string, unknown> = {}) => ({ update_id: 100, cha
 before(async () => {
   root = await mkdtemp(resolve(tmpdir(), 'matonos-server-'));
   storage = resolve(root, 'storage'); configPath = resolve(root, 'channels.json');
-  process.env.MATON_SERVER_STORAGE_DIR = storage; process.env.MATON_SERVER_CONFIG = configPath; process.env.MATON_SERVER_TRUST_PROXY = '1';
+  process.env.MATON_SERVER_STORAGE_DIR = storage; process.env.MATON_SERVER_DATA_DIR = resolve(root, 'data'); process.env.MATON_SERVER_CONFIG = configPath; process.env.MATON_SERVER_TRUST_PROXY = '1';
   await mkdir(storage);
   const fdroid = resolve(root, 'fdroid'); process.env.MATON_SERVER_FDROID_DIR = fdroid;
   await mkdir(resolve(fdroid, 'repo'), { recursive: true });
@@ -180,8 +180,8 @@ describe('OTA API', () => {
     });
     const stats = await fetch(`${baseUrl}/api/fdroid/stats/org.example.app`);
     assert.deepEqual(await stats.json(), { downloads: 1 });
-    assert.equal((await readFile(resolve(root, 'storage', 'maton.db'))).includes(Buffer.from('198.51.100')), false);
-    assert.equal((await readFile(resolve(root, 'storage', 'fdroid-stats.salt'), 'utf8')).length, 64);
+    assert.equal((await readFile(resolve(root, 'data', 'maton.db'))).includes(Buffer.from('198.51.100')), false);
+    assert.equal((await readFile(resolve(root, 'data', 'fdroid-stats.salt'), 'utf8')).length, 64);
   });
 
   it('validates generic rating payloads and app keys', async () => {
@@ -197,8 +197,8 @@ describe('OTA API', () => {
     assert.equal(registered.status, 201);
     const registrationBody = await registered.json() as any;
     assert.equal(typeof registrationBody.token, 'string'); assert.equal(typeof registrationBody.refresh_token, 'string'); assert.equal('email' in registrationBody, false);
-    assert.equal((await stat(resolve(storage, 'maton.db'))).mode & 0o777, 0o600);
-    assert.equal((await stat(resolve(storage, 'jwt.secret'))).mode & 0o777, 0o600);
+    assert.equal((await stat(resolve(root, 'data', 'maton.db'))).mode & 0o777, 0o600);
+    assert.equal((await stat(resolve(root, 'data', 'jwt.secret'))).mode & 0o777, 0o600);
     const cookie = registered.headers.get('set-cookie')!.split(';')[0];
     const authHeaders = { ...headers, cookie };
     assert.equal((await request('/api/reviews/apps/org.example.app', { stars:5, title:'Great app', body:'Works well on my PC.' }, authHeaders)).status, 200);
@@ -326,7 +326,7 @@ describe('OTA API', () => {
   it('refuses promotion to a lower Android base', () => {
     const source = new URL('../src/promote.ts', import.meta.url);
     const result = spawnSync(process.execPath, [source.pathname, 'testing', '102'], {
-      env: { ...process.env, MATON_SERVER_CONFIG: configPath, MATON_SERVER_STORAGE_DIR: storage }, encoding: 'utf8'
+      env: { ...process.env, MATON_SERVER_CONFIG: configPath, MATON_SERVER_STORAGE_DIR: storage, MATON_SERVER_DATA_DIR: resolve(root, 'data') }, encoding: 'utf8'
     });
     assert.notEqual(result.status, 0);
     assert.match(result.stderr, /refusing Android base downgrade/);
@@ -335,7 +335,7 @@ describe('OTA API', () => {
   it('allows promotion in either direction on the same Android base', async () => {
     const source = new URL('../src/promote.ts', import.meta.url);
     const result = spawnSync(process.execPath, [source.pathname, 'main', '101'], {
-      env: { ...process.env, MATON_SERVER_CONFIG: configPath, MATON_SERVER_STORAGE_DIR: storage }, encoding: 'utf8'
+      env: { ...process.env, MATON_SERVER_CONFIG: configPath, MATON_SERVER_STORAGE_DIR: storage, MATON_SERVER_DATA_DIR: resolve(root, 'data') }, encoding: 'utf8'
     });
     assert.equal(result.status, 0, result.stderr);
     const config = JSON.parse(await readFile(configPath, 'utf8'));

@@ -7,6 +7,7 @@ library; configured mail uses the pinned `nodemailer` package. The OTA protocol 
 
 ```sh
 export MATON_SERVER_STORAGE_DIR=/srv/matonos-server/storage
+export MATON_SERVER_DATA_DIR=/srv/matonos-server/data
 export MATON_SERVER_CONFIG=/etc/matonos-server/channels.json
 export MATON_SERVER_PORT=8080
 export MATON_SERVER_HOST=127.0.0.1   # default; the server sits behind a reverse proxy
@@ -47,6 +48,7 @@ Type=simple
 WorkingDirectory=%h/matonos/repos/matonos-ota
 Environment=MATON_SERVER_PORT=8080
 Environment=MATON_SERVER_STORAGE_DIR=%h/matonos-server/storage
+Environment=MATON_SERVER_DATA_DIR=%h/matonos-server/data
 Environment=MATON_SERVER_CONFIG=%h/.config/matonos-server/channels.json
 ExecStart=/usr/bin/node src/server.ts
 Restart=on-failure
@@ -156,7 +158,7 @@ Responses use an ETag and one-hour public cache lifetime. Bodies are limited
 to 64 KiB and event requests are limited to 60/minute per hashed address.
 
 All account, session-device, reset-token, rate-limit, review, anonymous-rating,
-and F-Droid download data live in `MATON_SERVER_STORAGE_DIR/maton.db`, using Node's
+and F-Droid download data live in `MATON_SERVER_DATA_DIR/maton.db` (private: database, `jwt.secret`, `fdroid-stats.salt`; never under a served directory), using Node's
 built-in SQLite with WAL and foreign keys enabled. The database schema version
 is `PRAGMA user_version`; ordered migrations are applied in one transaction.
 The server sets umask 077 and keeps the database, WAL, SHM, JWT secret, and
@@ -166,7 +168,7 @@ start as `jwt.secret` and never belongs in the repository or logs. Back up the
 database with SQLite's online backup command:
 
 ```sh
-sqlite3 /srv/matonos-server/storage/maton.db '.backup /srv/matonos-server/backups/maton.db'
+sqlite3 /srv/matonos-server/data/maton.db '.backup /srv/matonos-server/backups/maton.db'
 chmod 0600 /srv/matonos-server/backups/maton.db
 ```
 
