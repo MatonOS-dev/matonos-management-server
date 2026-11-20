@@ -11,6 +11,8 @@ const CONFIG_PATH = process.env.OTA_CONFIG;
 const FDROID_DIR = process.env.OTA_FDROID_DIR;
 // Installer media (ISO, raw live image, checksums). Names carry the update id, so they never change.
 const DOWNLOAD_DIR = process.env.OTA_DOWNLOAD_DIR;
+// Set to 1 when a local reverse proxy (nginx) sets X-Real-IP to the resolved client address.
+const TRUST_PROXY = process.env.OTA_TRUST_PROXY === '1';
 const IMMUTABLE = 'public, max-age=31536000, immutable';
 // F-Droid index files change on every publish; everything else in the repo is versioned by name.
 const FDROID_INDEX_RE = /^(entry\.(jar|json)|index(-v1|-v2)?\.(jar|json|xml|html)|diff\/.*)$/;
@@ -131,8 +133,11 @@ async function requestBody(req: any): Promise<unknown> {
 }
 
 function clientHash(req: any, salt: string) {
-  // No trusted-proxy option exists on this server. Deliberately use the socket peer.
-  const address = String(req.socket?.remoteAddress ?? 'unknown');
+  const peer = String(req.socket?.remoteAddress ?? 'unknown');
+  const loopback = peer === '127.0.0.1' || peer === '::1' || peer === '::ffff:127.0.0.1';
+  const forwarded = req.headers?.['x-real-ip'];
+  // X-Real-IP is trusted only from a loopback proxy with OTA_TRUST_PROXY=1; otherwise the socket peer counts.
+  const address = TRUST_PROXY && loopback && typeof forwarded === 'string' && forwarded ? forwarded : peer;
   return createHash('sha256').update(salt).update('\0').update(address).digest('hex');
 }
 

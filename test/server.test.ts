@@ -44,7 +44,7 @@ const payload = (values: Record<string, unknown> = {}) => ({ update_id: 100, cha
 before(async () => {
   root = await mkdtemp(resolve(tmpdir(), 'matonos-ota-'));
   storage = resolve(root, 'storage'); configPath = resolve(root, 'channels.json');
-  process.env.OTA_STORAGE_DIR = storage; process.env.OTA_CONFIG = configPath;
+  process.env.OTA_STORAGE_DIR = storage; process.env.OTA_CONFIG = configPath; process.env.OTA_TRUST_PROXY = '1';
   await mkdir(storage);
   const fdroid = resolve(root, 'fdroid'); process.env.OTA_FDROID_DIR = fdroid;
   await mkdir(resolve(fdroid, 'repo'), { recursive: true });
@@ -146,6 +146,15 @@ describe('OTA API', () => {
     assert.equal((await fetch(`${baseUrl}/download/nested/x.iso`)).status, 404);
     assert.equal((await fetch(`${baseUrl}/download/..%2Fstorage`)).status, 404);
     assert.equal((await fetch(`${baseUrl}/download/missing.iso`)).status, 404);
+  });
+
+  it('counts X-Real-IP from a loopback proxy as the client address', async () => {
+    const body = { packageName: 'org.example.proxied' };
+    await request('/api/fdroid/install', body, { 'x-real-ip': '198.51.100.1' });
+    await request('/api/fdroid/install', body, { 'x-real-ip': '198.51.100.1' });
+    await request('/api/fdroid/install', body, { 'x-real-ip': '198.51.100.2' });
+    const stats = await fetch(`${baseUrl}/api/fdroid/stats/org.example.proxied`);
+    assert.equal((await stats.json()).downloads, 2);
   });
 
   it('deduplicates installs and keeps the latest per-IP rating with cache validators', async () => {
