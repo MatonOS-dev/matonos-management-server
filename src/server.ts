@@ -3,6 +3,8 @@ import { createServer } from 'node:http';
 import { createHash, randomBytes } from 'node:crypto';
 import { basename, extname, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { database } from './database.ts';
+import { handleAccountReviewApi } from './accounts.ts';
 
 const PORT = Number(process.env.OTA_PORT ?? '8080');
 const HOST = process.env.OTA_HOST ?? '127.0.0.1';
@@ -21,9 +23,7 @@ const MAX_BODY = 64 * 1024;
 const CHANNEL_RE = /^[a-z0-9_]+$/;
 const UPDATE_ID_RE = /^[1-9][0-9]{0,19}$/;
 const PACKAGE_RE = /^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)+$/;
-const FSTATS_FILE = 'fdroid-stats.json';
 const FSTATS_SALT_FILE = 'fdroid-stats.salt';
-const RATINGS_FILE = 'ratings.json';
 const APP_KEY_RE = /^[A-Za-z0-9][A-Za-z0-9._+-]{0,254}$/;
 const statsRate = new Map<string, { start: number; count: number }>();
 let statsQueue = Promise.resolve();
@@ -63,13 +63,10 @@ function validateBody(body: any) {
   if (!Number.isSafeInteger(body.base_android) || body.base_android <= 0) throw fail(400, 'invalid_base_android', 'base_android must be a positive integer');
   if (typeof body.channel !== 'string' || !CHANNEL_RE.test(body.channel)) throw fail(400, 'invalid_channel', 'channel has an invalid format');
   if (body.machine_id !== undefined && typeof body.machine_id !== 'string') throw fail(400, 'invalid_machine_id', 'machine_id must be a string');
-  if (body.license_hash !== undefined && typeof body.license_hash !== 'string') {
-    throw fail(400, 'invalid_license_hash', 'license_hash must be a string');
-  }
   if (!Array.isArray(body.addon_list) || body.addon_list.some((id: unknown) => typeof id !== 'string')) {
     throw fail(400, 'invalid_addon_list', 'addon_list must contain add-on id strings');
   }
-  return body as { update_id: string | number; channel: string; base_android: number; machine_id?: string; license_hash?: string; addon_list: string[] };
+  return body as { update_id: string | number; channel: string; base_android: number; machine_id?: string; addon_list: string[] };
 }
 
 async function readConfig() {
@@ -134,7 +131,7 @@ async function requestBody(req: any): Promise<unknown> {
   catch { throw fail(400, 'malformed_json', 'Request body is not valid JSON'); }
 }
 
-function clientHash(req: any, salt: string) {
+export function clientHash(req: any, salt: string) {
   const peer = String(req.socket?.remoteAddress ?? 'unknown');
   const loopback = peer === '127.0.0.1' || peer === '::1' || peer === '::ffff:127.0.0.1';
   const forwarded = req.headers?.['x-real-ip'];
@@ -143,7 +140,7 @@ function clientHash(req: any, salt: string) {
   return createHash('sha256').update(salt).update('\0').update(address).digest('hex');
 }
 
-async function statsSecrets() {
+export async function statsSecrets() {
   if (!STORAGE_DIR) throw new Error('OTA_STORAGE_DIR is not set');
   await fs.mkdir(STORAGE_DIR, { recursive: true });
   const path = resolve(STORAGE_DIR, FSTATS_SALT_FILE);
@@ -157,14 +154,10 @@ async function statsSecrets() {
 }
 
 async function readStats() {
-  try { const stored = JSON.parse(await fs.readFile(resolve(STORAGE_DIR!, FSTATS_FILE), 'utf8')); return { downloads: stored.downloads ?? {} }; }
-  catch (error: any) { if (error?.code === 'ENOENT') return { downloads: {} }; throw error; }
-}
-
-async function writeStats(stats: any) {
-  const path = resolve(STORAGE_DIR!, FSTATS_FILE), temp = `${path}.${process.pid}.tmp`;
-  await fs.writeFile(temp, `${JSON.stringify(stats)}\n`, { mode: 0o600 });
-  await fs.rename(temp, path);
+  const db = await database(), rows = db.prepare('SELECT package,identity FROM downloads').all() as any[];
+  const downloads: Record<string, Record<string, boolean>> = {};
+  for (const row of rows) { downloads[row.package] ??= {}; downloads[row.package][row.identity] = true; }
+  return { downloads };
 }
 
 function packageName(value: unknown) {
@@ -206,10 +199,7 @@ async function handleFdroidApi(req: any, res: any) {
   if (pathname.endsWith('/install') && (body as any)?.versionCode !== undefined && (!Number.isSafeInteger((body as any).versionCode) || (body as any).versionCode < 0)) throw fail(400, 'invalid_version_code', 'versionCode must be a nonnegative integer');
   const salt = await statsSecrets(), hash = clientHash(req, salt); rateStats(hash);
   const update = statsQueue.catch(() => {}).then(async () => {
-    const stats = await readStats();
-    if (pathname.endsWith('/install')) { stats.downloads[app] ??= {}; stats.downloads[app][hash] = true; }
-
-    await writeStats(stats);
+    if (pathname.endsWith('/install')) (await database()).prepare('INSERT OR IGNORE INTO downloads(package,identity) VALUES(?,?)').run(app, hash);
   });
   statsQueue = update;
   await update;
@@ -221,64 +211,14 @@ function appKey(value: unknown): string {
   return value;
 }
 
-async function readRatings() {
-  try { return JSON.parse(await fs.readFile(resolve(STORAGE_DIR!, RATINGS_FILE), 'utf8')); }
-  catch (error: any) { if (error?.code === 'ENOENT') return {}; throw error; }
-}
-
-async function writeRatings(ratings: any) {
-  const path = resolve(STORAGE_DIR!, RATINGS_FILE), temp = `${path}.${process.pid}.tmp`;
-  await fs.writeFile(temp, `${JSON.stringify(ratings)}\n`, { mode: 0o600 });
-  await fs.rename(temp, path);
-}
-
-function ratingSummary(values: number[]) {
-  const histogram = [1, 2, 3, 4, 5].map((stars) => values.filter((value) => value === stars).length);
-  return { count: values.length, avg: values.length ? values.reduce((sum, value) => sum + value, 0) / values.length : 0, histogram };
-}
-
-async function handleRatingsApi(req: any, res: any) {
-  const url = new URL(req.url ?? '/', 'http://localhost');
-  const pathname = url.pathname;
-  if (pathname === '/api/ratings' && req.method === 'GET') {
-    const query = url.searchParams.get('apps');
-    if (query === null) throw fail(400, 'missing_apps', 'apps query parameter is required');
-    const keys = query === '' ? [] : query.split(',').map(appKey);
-    if (keys.length > 100) throw fail(400, 'too_many_apps', 'At most 100 app keys may be requested');
-    const ratings = await readRatings(), result: Record<string, ReturnType<typeof ratingSummary>> = {};
-    for (const key of keys) result[key] = ratingSummary(Object.values(ratings[key] ?? {}) as number[]);
-    return json(res, 200, result);
-  }
-  if (pathname.startsWith('/api/ratings/')) {
-    let key: string;
-    try { key = appKey(decodeURIComponent(pathname.slice('/api/ratings/'.length))); }
-    catch (error) { if (error instanceof URIError) throw fail(400, 'invalid_app', 'app key is not valid URL encoding'); throw error; }
-    if (req.method !== 'GET') throw fail(405, 'method_not_allowed', 'Rating lookup requires GET');
-    const ratings = await readRatings();
-    return json(res, 200, ratingSummary(Object.values(ratings[key] ?? {}) as number[]));
-  }
-  if (pathname !== '/api/ratings' || req.method !== 'POST') throw fail(404, 'not_found', 'Ratings API endpoint not found');
-  const body = await requestBody(req), key = appKey((body as any)?.app), stars = (body as any)?.stars;
-  if (!Number.isInteger(stars) || stars < 1 || stars > 5) throw fail(400, 'invalid_stars', 'stars must be an integer from 1 to 5');
-  const hash = clientHash(req, await statsSecrets()); rateStats(hash);
-  const update = statsQueue.catch(() => {}).then(async () => {
-    const ratings = await readRatings();
-    ratings[key] ??= {}; ratings[key][hash] = stars;
-    await writeRatings(ratings);
-  });
-  statsQueue = update;
-  await update;
-  return json(res, 200, { ok: true });
-}
-
 async function handleApi(req: any, res: any) {
   const path = new URL(req.url ?? '/', 'http://localhost').pathname;
-  if (!['/api/channels', '/api/update', '/api/eol', '/api/license'].includes(path)) throw fail(404, 'not_found', 'API endpoint not found');
+  if (!['/api/update/channels', '/api/update/check', '/api/update/eol', '/api/update/license'].includes(path)) throw fail(404, 'not_found', 'API endpoint not found');
   if (req.method !== 'POST') throw fail(405, 'method_not_allowed', 'API endpoints require POST');
   const body = validateBody(await requestBody(req));
   const config = await readConfig();
-  if (path === '/api/license') return json(res, 200, { status: 'none', license: null });
-  if (path === '/api/channels') {
+  if (path === '/api/update/license') return json(res, 200, { status: 'none', license: null });
+  if (path === '/api/update/channels') {
     const channels = [];
     for (const [name, entry] of Object.entries(config.channels)) {
       if (entry.requires_license) continue;
@@ -288,7 +228,7 @@ async function handleApi(req: any, res: any) {
     }
     return json(res, 200, { channels });
   }
-  if (path === '/api/eol') {
+  if (path === '/api/update/eol') {
     return json(res, 200, { eol: false });
   }
   const selected = config.channels[body.channel];
@@ -404,14 +344,14 @@ export function createOtaServer() {
     try {
       const path = new URL(req.url ?? '/', 'http://localhost').pathname;
       if (path.startsWith('/api/fdroid/')) await handleFdroidApi(req, res);
-      else if (path === '/api/ratings' || path.startsWith('/api/ratings/')) await handleRatingsApi(req, res);
+      else if (path.startsWith('/api/account') || path.startsWith('/api/reviews/')) await handleAccountReviewApi(req, res, path, new URL(req.url ?? '/', 'http://localhost'));
       else if (path.startsWith('/api/')) await handleApi(req, res);
       else if (path.startsWith('/storage/')) await handleStorage(req, res);
       else if (path.startsWith('/fdroid/')) await handleFdroid(req, res);
       else if (path.startsWith('/download/')) await handleDownload(req, res);
       else throw fail(404, 'not_found', 'Not found');
     } catch (error: any) {
-      if (error instanceof HttpError) {
+      if (error instanceof HttpError || (Number.isInteger(error?.status) && typeof error?.code === 'string')) {
         log('warn', 'request_rejected', { method: req.method, path: new URL(req.url ?? '/', 'http://localhost').pathname, status: error.status, code: error.code });
         if (!res.headersSent) json(res, error.status, { error: error.code, message: error.message });
         else res.destroy();
