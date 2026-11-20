@@ -345,7 +345,10 @@ export function createOtaServer() {
     try {
       const path = new URL(req.url ?? '/', 'http://localhost').pathname;
       if (path.startsWith('/api/fdroid/')) await handleFdroidApi(req, res);
-      else if (path.startsWith('/api/account') || path.startsWith('/api/reviews/')) await handleAccountReviewApi(req, res, path, new URL(req.url ?? '/', 'http://localhost'));
+      else if (path.startsWith('/api/account') || path.startsWith('/api/reviews/')) {
+        const handled = await handleAccountReviewApi(req, res, path, new URL(req.url ?? '/', 'http://localhost'));
+        if (handled === false) throw fail(404, 'not_found', 'API endpoint not found');
+      }
       else if (path.startsWith('/api/')) await handleApi(req, res);
       else if (path.startsWith('/storage/')) await handleStorage(req, res);
       else if (path.startsWith('/fdroid/')) await handleFdroid(req, res);

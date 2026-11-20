@@ -349,4 +349,11 @@ describe('OTA API', () => {
     const config = JSON.parse(await readFile(configPath, 'utf8'));
     assert.equal(config.channels.main.update_id, 101);
   });
+
+  it('unknown review and account paths answer 404 instead of hanging', async () => {
+  for (const path of ['/api/reviews/ws.xsoh.etar', '/api/accountx', '/api/reviews/apps']) {
+    const response = await fetch(`${baseUrl}${path}`, { signal: AbortSignal.timeout(5000) });
+    assert.equal(response.status, 404, path);
+  }
+});
 });
