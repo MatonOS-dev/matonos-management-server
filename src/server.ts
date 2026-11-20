@@ -3,7 +3,7 @@ import { createServer } from 'node:http';
 import { createHash, randomBytes } from 'node:crypto';
 import { basename, extname, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { database } from './database.ts';
+import { database, jwtSecret } from './database.ts';
 import { handleAccountReviewApi } from './accounts.ts';
 
 const PORT = Number(process.env.OTA_PORT ?? '8080');
@@ -368,5 +368,10 @@ const invoked = process.argv[1] && resolve(process.argv[1]) === fileURLToPath(im
 if (invoked) {
   if (!Number.isInteger(PORT) || PORT < 1 || PORT > 65535) throw new Error('OTA_PORT must be a valid TCP port');
   if (!STORAGE_DIR || !CONFIG_PATH) throw new Error('OTA_STORAGE_DIR and OTA_CONFIG are required');
-  createOtaServer().listen(PORT, HOST, () => log('info', 'server_listening', { host: HOST, port: PORT }));
+  database().then(() => jwtSecret()).then(() => {
+    createOtaServer().listen(PORT, HOST, () => log('info', 'server_listening', { host: HOST, port: PORT }));
+  }).catch((error) => {
+    log('error', 'server_startup_failed', { error:String(error) });
+    process.exitCode = 1;
+  });
 }
