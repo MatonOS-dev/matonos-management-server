@@ -1,5 +1,5 @@
 {
-  "name": "matonos-ota-server",
+  "name": "matonos-management-server",
   "private": true,
   "version": "1.0.0",
   "type": "module",
@@ -13,5 +13,6 @@
   "dependencies": {
     "jose": "6.2.18",
     "nodemailer": "10.6.0"
-  }
+  },
+  "license": "GPL-2.0-only"
 }

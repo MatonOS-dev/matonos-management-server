@@ -1,18 +1,16 @@
-# MatonOS OTA API server
+# MatonOS management server
 
-Node 24 HTTP server for update discovery, MatonOS accounts, ratings and
-reviews, and immutable release files. Account sessions use the pinned `jose`
-library; configured mail uses the pinned `nodemailer` package. See [the OTA contract](../install/OTA-CONTRACT.md)
-for complete endpoint schemas and behavior.
+Node 24 HTTP server for updates, F-Droid statistics, ratings, reviews, MatonOS accounts, and immutable release files. Account sessions use the pinned `jose`
+library; configured mail uses the pinned `nodemailer` package. The OTA protocol serves update discovery and immutable release files. See [the OTA contract](../install/OTA-CONTRACT.md) for its endpoint schemas and behavior.
 
 ## Run
 
 ```sh
-export OTA_STORAGE_DIR=/srv/matonos-ota/storage
-export OTA_CONFIG=/etc/matonos-ota/channels.json
-export OTA_PORT=8080
-export OTA_HOST=127.0.0.1   # default; the server sits behind a reverse proxy
-export OTA_FDROID_DIR=/srv/matonos-ota/fdroid   # optional: serves the MatonOS F-Droid repo at /fdroid/
+export MATON_SERVER_STORAGE_DIR=/srv/matonos-server/storage
+export MATON_SERVER_CONFIG=/etc/matonos-server/channels.json
+export MATON_SERVER_PORT=8080
+export MATON_SERVER_HOST=127.0.0.1   # default; the server sits behind a reverse proxy
+export MATON_SERVER_FDROID_DIR=/srv/matonos-server/fdroid   # optional: serves the MatonOS F-Droid repo at /fdroid/
 node src/server.ts
 ```
 
@@ -21,8 +19,8 @@ guarded CLI. It rejects a lower Android base than the channel currently
 serves:
 
 ```sh
-OTA_STORAGE_DIR=/srv/matonos-ota/storage \
-OTA_CONFIG=/etc/matonos-ota/channels.json \
+MATON_SERVER_STORAGE_DIR=/srv/matonos-server/storage \
+MATON_SERVER_CONFIG=/etc/matonos-server/channels.json \
 node src/promote.ts testing 1795430400
 ```
 
@@ -41,15 +39,15 @@ Configuration paths are supplied by environment variables. Example:
 
 ```ini
 [Unit]
-Description=MatonOS OTA API server
+Description=MatonOS management server
 After=network-online.target
 
 [Service]
 Type=simple
-WorkingDirectory=%h/matonos/ota-server
-Environment=OTA_PORT=8080
-Environment=OTA_STORAGE_DIR=%h/matonos-ota/storage
-Environment=OTA_CONFIG=%h/.config/matonos-ota/channels.json
+WorkingDirectory=%h/matonos/repos/matonos-ota
+Environment=MATON_SERVER_PORT=8080
+Environment=MATON_SERVER_STORAGE_DIR=%h/matonos-server/storage
+Environment=MATON_SERVER_CONFIG=%h/.config/matonos-server/channels.json
 ExecStart=/usr/bin/node src/server.ts
 Restart=on-failure
 RestartSec=3
@@ -58,11 +56,11 @@ RestartSec=3
 WantedBy=default.target
 ```
 
-Place this at `~/.config/systemd/user/matonos-ota.service`, then run:
+Place this at `~/.config/systemd/user/matonos-management-server.service`, then run:
 
 ```sh
 systemctl --user daemon-reload
-systemctl --user enable --now matonos-ota.service
+systemctl --user enable --now matonos-management-server.service
 ```
 
 Put TLS termination and the `/api` and `/storage` routes behind the deployment
@@ -76,20 +74,20 @@ npm test
 python3 ../install/ota/test_ota.py
 ```
 
-Node tests cover all four API endpoints, downgrade filtering and promotion,
+Node tests cover the APIs, account refresh rotation and revocation, downgrade filtering and promotion,
 the required add-on gate, fixed EOL response, malformed requests, and byte ranges. The Python test
 checks publisher output and compatibility with the native slot-writer
 manifest verifier.
 
 ## Installer downloads
 
-With `OTA_DOWNLOAD_DIR` set, `/download/<file>` serves the flat files of that directory (no subdirectories,
+With `MATON_SERVER_DOWNLOAD_DIR` set, `/download/<file>` serves the flat files of that directory (no subdirectories,
 byte ranges supported) as immutable. Name every file by update id, e.g. `matonos-<update_id>-x86_64.iso`
 plus `.sha256`, and never replace a file in place.
 
 ## F-Droid repository
 
-With `OTA_FDROID_DIR` set, `/fdroid/<path>` serves that directory as plain files (byte ranges supported).
+With `MATON_SERVER_FDROID_DIR` set, `/fdroid/<path>` serves that directory as plain files (byte ranges supported).
 Index files under `repo/` (`entry.*`, `index*.{jar,json,xml,html}`, `diff/`) get `Cache-Control: public, max-age=60`;
 everything else (APKs, icons) is versioned by name and cached as immutable. Cloudflare follows these headers.
 
@@ -110,23 +108,43 @@ not split the same app.
 Accounts use `POST /api/account/register` and `/login`, `POST /logout`,
 `GET /api/account` for the signed-in user's own username, e-mail, and
 verification state, and `DELETE /api/account` with a password confirmation.
-Sessions are 30-day HS256 JWTs in the `maton_session` Secure, HttpOnly,
-SameSite=Strict cookie. Each session is bound to the machine id sent in
+Access tokens are one-hour HS256 JWTs in the `maton_session` Secure, HttpOnly,
+SameSite=Strict cookie. Login also returns a random month-long refresh token in
+JSON and the `maton_refresh` Secure, HttpOnly, SameSite=Strict cookie scoped to
+`/api/account/refresh`. The refresh token is stored only as SHA-256 in the
+device row and rotates on every refresh while keeping that device’s `jti`. A
+reused previous refresh token revokes the device. A device that refreshes at
+least once every 30 days stays signed in. Device `last_refreshed` is shown as
+last active. Each session is bound to the machine id sent in
 `X-Maton-Machine-Id`; account devices can be listed with
 `GET /api/account/devices` and revoked with `DELETE /api/account/devices/<id>`.
 Login failures use per-IP-hash and per-account exponential backoff. Usernames
 are case insensitive for uniqueness; e-mail is private and appears only in
 the authenticated account response.
 
-Verification and password-reset mail use `OTA_SMTP_URL` and `OTA_MAIL_FROM`.
+Verification and password-reset mail use `MATON_SERVER_SMTP_URL` and `MATON_SERVER_MAIL_FROM`.
 Without both variables, reset requests return `503 mail_not_configured` and
 accounts remain usable but unverified. Reset and verification tokens are
-single-use and expire after one hour. Written review text is checked against
-the committed multilingual
-[LDNOOBW word list](https://github.com/LDNOOBW/List-of-Dirty-Naughty-Obscene-and-Otherwise-Bad-Words),
-licensed CC BY 4.0; the source attribution and license are in `src/data/`.
-The filter normalizes Unicode, diacritics, common leetspeak, repeated letters,
-and separators; it also rejects URLs, e-mail addresses, and blank reviews.
+single-use and expire after one hour. Review text rejects URLs, e-mail
+addresses, and blank reviews. The previous CC BY 4.0 multilingual word list
+was removed because it is incompatible with GPL-2.0-only; review word
+filtering is currently omitted.
+
+## Third-party
+
+| Component or data | License |
+| --- | --- |
+| `jose` 6.2.18 (runtime) | MIT |
+| `nodemailer` 10.6.0 (runtime) | MIT-0 |
+| Bundled data files | None |
+| LDNOOBW multilingual word list (removed) | CC BY 4.0; incompatible with GPL-2.0-only, no longer distributed |
+| Node.js 24 runtime and built-in test modules | MIT |
+
+The runtime dependency graph is fully represented by these two entries in `package-lock.json`; both licenses are GPLv2-compatible.
+
+## License
+
+This repository is licensed under GPL-2.0-only; see [`LICENSE`](LICENSE).
 
 ## F-Droid statistics
 
@@ -138,7 +156,7 @@ Responses use an ETag and one-hour public cache lifetime. Bodies are limited
 to 64 KiB and event requests are limited to 60/minute per hashed address.
 
 All account, session-device, reset-token, rate-limit, review, anonymous-rating,
-and F-Droid download data live in `OTA_STORAGE_DIR/maton.db`, using Node's
+and F-Droid download data live in `MATON_SERVER_STORAGE_DIR/maton.db`, using Node's
 built-in SQLite with WAL and foreign keys enabled. The database schema version
 is `PRAGMA user_version`; ordered migrations are applied in one transaction.
 The server sets umask 077 and keeps the database, WAL, SHM, JWT secret, and
@@ -148,8 +166,8 @@ start as `jwt.secret` and never belongs in the repository or logs. Back up the
 database with SQLite's online backup command:
 
 ```sh
-sqlite3 /srv/matonos-ota/storage/maton.db '.backup /srv/matonos-ota/backups/maton.db'
-chmod 0600 /srv/matonos-ota/backups/maton.db
+sqlite3 /srv/matonos-server/storage/maton.db '.backup /srv/matonos-server/backups/maton.db'
+chmod 0600 /srv/matonos-server/backups/maton.db
 ```
 
 Keep `jwt.secret` and `fdroid-stats.salt` with the database backup. No raw IP

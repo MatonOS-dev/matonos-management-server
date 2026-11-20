@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 import { DatabaseSync } from 'node:sqlite';
 import { mkdir, chmod, readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
@@ -13,7 +14,14 @@ export const migrations = [
    CREATE TABLE reviews (app TEXT NOT NULL, account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE, stars INTEGER NOT NULL CHECK(stars BETWEEN 1 AND 5), title TEXT NOT NULL, body TEXT NOT NULL, created INTEGER NOT NULL, updated INTEGER NOT NULL, PRIMARY KEY(app, account_id));
    CREATE INDEX reviews_newest ON reviews(app, updated DESC);
    CREATE TABLE ratings (app TEXT NOT NULL, identity TEXT NOT NULL, stars INTEGER NOT NULL CHECK(stars BETWEEN 1 AND 5), PRIMARY KEY(app, identity));
-   CREATE TABLE downloads (package TEXT NOT NULL, identity TEXT NOT NULL, PRIMARY KEY(package, identity));`
+   CREATE TABLE downloads (package TEXT NOT NULL, identity TEXT NOT NULL, PRIMARY KEY(package, identity));`,
+  `ALTER TABLE devices ADD COLUMN refresh_hash TEXT;
+   ALTER TABLE devices ADD COLUMN prev_refresh_hash TEXT;
+   ALTER TABLE devices ADD COLUMN refresh_expires INTEGER;
+   ALTER TABLE devices ADD COLUMN last_refreshed INTEGER;
+   UPDATE devices SET last_refreshed=last_seen;
+   CREATE UNIQUE INDEX devices_refresh_hash ON devices(refresh_hash) WHERE refresh_hash IS NOT NULL;
+   CREATE UNIQUE INDEX devices_prev_refresh_hash ON devices(prev_refresh_hash) WHERE prev_refresh_hash IS NOT NULL;`
 ];
 
 export function applyMigrations(connection:DatabaseSync, steps:string[] = migrations) {
@@ -36,8 +44,8 @@ export function applyMigrations(connection:DatabaseSync, steps:string[] = migrat
 let db: DatabaseSync | undefined;
 export async function database() {
   if (db) return db;
-  const dir = process.env.OTA_STORAGE_DIR;
-  if (!dir) throw new Error('OTA_STORAGE_DIR is not set');
+  const dir = process.env.MATON_SERVER_STORAGE_DIR;
+  if (!dir) throw new Error('MATON_SERVER_STORAGE_DIR is not set');
   process.umask(0o077);
   await mkdir(dir, { recursive: true, mode: 0o700 });
   const path = resolve(dir, 'maton.db');
@@ -53,8 +61,8 @@ export async function database() {
 }
 
 export async function jwtSecret() {
-  const dir = process.env.OTA_STORAGE_DIR;
-  if (!dir) throw new Error('OTA_STORAGE_DIR is not set');
+  const dir = process.env.MATON_SERVER_STORAGE_DIR;
+  if (!dir) throw new Error('MATON_SERVER_STORAGE_DIR is not set');
   const path = resolve(dir, 'jwt.secret');
   try {
     await chmod(path, 0o600);

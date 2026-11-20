@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 import { createReadStream, promises as fs } from 'node:fs';
 import { createServer } from 'node:http';
 import { createHash, randomBytes } from 'node:crypto';
@@ -6,15 +7,15 @@ import { fileURLToPath } from 'node:url';
 import { database, jwtSecret } from './database.ts';
 import { handleAccountReviewApi } from './accounts.ts';
 
-const PORT = Number(process.env.OTA_PORT ?? '8080');
-const HOST = process.env.OTA_HOST ?? '127.0.0.1';
-const STORAGE_DIR = process.env.OTA_STORAGE_DIR;
-const CONFIG_PATH = process.env.OTA_CONFIG;
-const FDROID_DIR = process.env.OTA_FDROID_DIR;
+const PORT = Number(process.env.MATON_SERVER_PORT ?? '8080');
+const HOST = process.env.MATON_SERVER_HOST ?? '127.0.0.1';
+const STORAGE_DIR = process.env.MATON_SERVER_STORAGE_DIR;
+const CONFIG_PATH = process.env.MATON_SERVER_CONFIG;
+const FDROID_DIR = process.env.MATON_SERVER_FDROID_DIR;
 // Installer media (ISO, raw live image, checksums). Names carry the update id, so they never change.
-const DOWNLOAD_DIR = process.env.OTA_DOWNLOAD_DIR;
+const DOWNLOAD_DIR = process.env.MATON_SERVER_DOWNLOAD_DIR;
 // Set to 1 when a local reverse proxy (nginx) sets X-Real-IP to the resolved client address.
-const TRUST_PROXY = process.env.OTA_TRUST_PROXY === '1';
+const TRUST_PROXY = process.env.MATON_SERVER_TRUST_PROXY === '1';
 const IMMUTABLE = 'public, max-age=31536000, immutable';
 // F-Droid index files change on every publish; everything else in the repo is versioned by name.
 const FDROID_INDEX_RE = /^(entry\.(jar|json)|index(-v1|-v2)?\.(jar|json|xml|html)|diff\/.*)$/;
@@ -29,7 +30,7 @@ const statsRate = new Map<string, { start: number; count: number }>();
 let statsQueue = Promise.resolve();
 
 function log(level: string, event: string, fields: Record<string, unknown> = {}) {
-  process.stderr.write(`${JSON.stringify({ time: new Date().toISOString(), level, event, ...fields })}\n`);
+  process.stderr.write(`${JSON.stringify({ service:'matonos-management-server', time: new Date().toISOString(), level, event, ...fields })}\n`);
 }
 
 function fail(status: number, code: string, message: string): HttpError {
@@ -70,7 +71,7 @@ function validateBody(body: any) {
 }
 
 async function readConfig() {
-  if (!CONFIG_PATH) throw new Error('OTA_CONFIG is not set');
+  if (!CONFIG_PATH) throw new Error('MATON_SERVER_CONFIG is not set');
   const config = JSON.parse(await fs.readFile(CONFIG_PATH, 'utf8'));
   if (!config || typeof config.channels !== 'object' || !config.channels) {
     throw new Error('config must contain a channels object');
@@ -85,7 +86,7 @@ async function readConfig() {
 }
 
 async function readManifest(id: string) {
-  if (!STORAGE_DIR) throw new Error('OTA_STORAGE_DIR is not set');
+  if (!STORAGE_DIR) throw new Error('MATON_SERVER_STORAGE_DIR is not set');
   const path = resolve(STORAGE_DIR, id, 'manifest.json');
   try {
     const manifest = JSON.parse(await fs.readFile(path, 'utf8'));
@@ -135,13 +136,13 @@ export function clientHash(req: any, salt: string) {
   const peer = String(req.socket?.remoteAddress ?? 'unknown');
   const loopback = peer === '127.0.0.1' || peer === '::1' || peer === '::ffff:127.0.0.1';
   const forwarded = req.headers?.['x-real-ip'];
-  // X-Real-IP is trusted only from a loopback proxy with OTA_TRUST_PROXY=1; otherwise the socket peer counts.
+  // X-Real-IP is trusted only from a loopback proxy with MATON_SERVER_TRUST_PROXY=1; otherwise the socket peer counts.
   const address = TRUST_PROXY && loopback && typeof forwarded === 'string' && forwarded ? forwarded : peer;
   return createHash('sha256').update(salt).update('\0').update(address).digest('hex');
 }
 
 export async function statsSecrets() {
-  if (!STORAGE_DIR) throw new Error('OTA_STORAGE_DIR is not set');
+  if (!STORAGE_DIR) throw new Error('MATON_SERVER_STORAGE_DIR is not set');
   await fs.mkdir(STORAGE_DIR, { recursive: true });
   const path = resolve(STORAGE_DIR, FSTATS_SALT_FILE);
   try { return await fs.readFile(path, 'utf8'); }
@@ -275,7 +276,7 @@ function pathParts(req: any, prefix: string) {
 }
 
 async function handleStorage(req: any, res: any) {
-  if (!STORAGE_DIR) throw new Error('OTA_STORAGE_DIR is not set');
+  if (!STORAGE_DIR) throw new Error('MATON_SERVER_STORAGE_DIR is not set');
   const parts = pathParts(req, '/storage/');
   if (parts.length < 2 || !UPDATE_ID_RE.test(parts[0])) throw fail(404, 'not_found', 'File not found');
   return serveFile(req, res, STORAGE_DIR, parts, IMMUTABLE);
@@ -366,8 +367,8 @@ export function createOtaServer() {
 
 const invoked = process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url);
 if (invoked) {
-  if (!Number.isInteger(PORT) || PORT < 1 || PORT > 65535) throw new Error('OTA_PORT must be a valid TCP port');
-  if (!STORAGE_DIR || !CONFIG_PATH) throw new Error('OTA_STORAGE_DIR and OTA_CONFIG are required');
+  if (!Number.isInteger(PORT) || PORT < 1 || PORT > 65535) throw new Error('MATON_SERVER_PORT must be a valid TCP port');
+  if (!STORAGE_DIR || !CONFIG_PATH) throw new Error('MATON_SERVER_STORAGE_DIR and MATON_SERVER_CONFIG are required');
   database().then(() => jwtSecret()).then(() => {
     createOtaServer().listen(PORT, HOST, () => log('info', 'server_listening', { host: HOST, port: PORT }));
   }).catch((error) => {

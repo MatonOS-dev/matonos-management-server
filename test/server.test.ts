@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 import { after, before, beforeEach, describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtemp, mkdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
@@ -42,15 +43,15 @@ const request = (endpoint: string, body: unknown, headers: Record<string, string
 const payload = (values: Record<string, unknown> = {}) => ({ update_id: 100, channel: 'testing', base_android: 18, machine_id: 'device-abc_123', addon_list: [], ...values });
 
 before(async () => {
-  root = await mkdtemp(resolve(tmpdir(), 'matonos-ota-'));
+  root = await mkdtemp(resolve(tmpdir(), 'matonos-server-'));
   storage = resolve(root, 'storage'); configPath = resolve(root, 'channels.json');
-  process.env.OTA_STORAGE_DIR = storage; process.env.OTA_CONFIG = configPath; process.env.OTA_TRUST_PROXY = '1';
+  process.env.MATON_SERVER_STORAGE_DIR = storage; process.env.MATON_SERVER_CONFIG = configPath; process.env.MATON_SERVER_TRUST_PROXY = '1';
   await mkdir(storage);
-  const fdroid = resolve(root, 'fdroid'); process.env.OTA_FDROID_DIR = fdroid;
+  const fdroid = resolve(root, 'fdroid'); process.env.MATON_SERVER_FDROID_DIR = fdroid;
   await mkdir(resolve(fdroid, 'repo'), { recursive: true });
   await writeFile(resolve(fdroid, 'repo', 'index-v2.json'), '{}');
   await writeFile(resolve(fdroid, 'repo', 'org.example_3.apk'), 'apk');
-  const download = resolve(root, 'download'); process.env.OTA_DOWNLOAD_DIR = download;
+  const download = resolve(root, 'download'); process.env.MATON_SERVER_DOWNLOAD_DIR = download;
   await mkdir(resolve(download, 'nested'), { recursive: true });
   await writeFile(resolve(download, 'matonos-100-x86_64.iso'), 'iso');
   await writeFile(resolve(download, 'nested', 'x.iso'), 'no');
@@ -195,15 +196,14 @@ describe('OTA API', () => {
     const registered = await request('/api/account/register', { username:'Reviewer_One', email:'reviewer@example.org', password:'a-long-password-1', device_name:'Test PC' }, headers);
     assert.equal(registered.status, 201);
     const registrationBody = await registered.json() as any;
-    assert.equal(typeof registrationBody.token, 'string'); assert.equal('email' in registrationBody, false);
+    assert.equal(typeof registrationBody.token, 'string'); assert.equal(typeof registrationBody.refresh_token, 'string'); assert.equal('email' in registrationBody, false);
     assert.equal((await stat(resolve(storage, 'maton.db'))).mode & 0o777, 0o600);
     assert.equal((await stat(resolve(storage, 'jwt.secret'))).mode & 0o777, 0o600);
     const cookie = registered.headers.get('set-cookie')!.split(';')[0];
     const authHeaders = { ...headers, cookie };
     assert.equal((await request('/api/reviews/apps/org.example.app', { stars:5, title:'Great app', body:'Works well on my PC.' }, authHeaders)).status, 200);
-    const rejected = await request('/api/reviews/apps/org.example.app', { stars:5, title:'f.u.c.k', body:'bad text' }, authHeaders);
-    assert.equal(rejected.status, 422);
-    const rejectedBody = await rejected.text(); assert.match(rejectedBody, /text_rejected/); assert.equal(rejectedBody.toLowerCase().includes('f.u.c.k'), false);
+    const unfiltered = await request('/api/reviews/apps/org.example.app', { stars:5, title:'f.u.c.k', body:'word list filtering was removed for GPLv2 compatibility' }, authHeaders);
+    assert.equal(unfiltered.status, 200);
     assert.equal((await request('/api/reviews/apps/org.example.app', { stars:5, title:'See https://example.org', body:'review' }, authHeaders)).status, 422);
     assert.equal((await fetch(`${baseUrl}/api/reviews/apps/org.example.app`)).status, 200);
     const listed = await (await fetch(`${baseUrl}/api/reviews/apps/org.example.app`)).json();
@@ -212,7 +212,7 @@ describe('OTA API', () => {
     assert.equal((await batch.json())['org.example.app'].avg, 13 / 3);
     assert.equal((await fetch(`${baseUrl}/api/account`, { headers: { cookie, 'x-maton-machine-id':'wrong-machine' } })).status, 401);
     const devices = await fetch(`${baseUrl}/api/account/devices`, { headers:authHeaders });
-    const [device] = await devices.json(); assert.equal(device.current, true); assert.equal(device.name, 'Test PC');
+    const [device] = await devices.json(); assert.equal(device.current, true); assert.equal(device.name, 'Test PC'); assert.equal(typeof device.last_refreshed, 'number');
     assert.equal((await fetch(`${baseUrl}/api/account/devices/${device.id}`, { method:'DELETE', headers:authHeaders })).status, 200);
     assert.equal((await fetch(`${baseUrl}/api/account`, { headers:authHeaders })).status, 401);
     const db = (await import('../src/database.ts')).database;
@@ -227,6 +227,9 @@ describe('OTA API', () => {
     const reloginCookie = relogin.headers.get('set-cookie')!.split(';')[0];
     assert.equal((await fetch(`${baseUrl}/api/account`, { headers:{ cookie:reloginCookie, 'x-maton-machine-id':machine } })).status, 200);
     assert.equal((await fetch(`${baseUrl}/api/account`, { headers:{ cookie:reloginCookie, 'x-maton-machine-id':machine } })).status, 200);
+    const loginBody = await relogin.json() as any;
+    assert.equal(typeof loginBody.token, 'string'); assert.equal(typeof loginBody.refresh_token, 'string');
+    assert.ok(relogin.headers.getSetCookie().some((v) => v.startsWith('maton_refresh=')));
     const deleted = await fetch(`${baseUrl}/api/account`, { method:'DELETE', headers:{ 'content-type':'application/json', cookie:reloginCookie, 'x-maton-machine-id':machine }, body:JSON.stringify({ password:'a-long-password-1' }) });
     assert.equal(deleted.status, 200);
     assert.equal(database.prepare('SELECT count(*) AS n FROM reviews WHERE account_id=?').get(accountRow.id)?.n, 0);
@@ -244,7 +247,9 @@ describe('OTA API', () => {
     const device = db.prepare('SELECT jti FROM devices WHERE account_id=?').get(row.id) as any;
     const mid = createHash('sha256').update(machineId + device.jti).digest('hex');
     const expired = await new SignJWT({mid}).setProtectedHeader({alg:'HS256'}).setSubject(row.id).setJti(device.jti).setIssuedAt(Math.floor(Date.now()/1000)-7200).setExpirationTime(Math.floor(Date.now()/1000)-3600).sign(new Uint8Array(await jwtSecret()));
-    assert.equal((await fetch(`${baseUrl}/api/account`, {headers:{cookie:`maton_session=${expired}`, 'x-maton-machine-id':machineId}})).status, 401);
+    const expiredHeaders = {cookie:`maton_session=${expired}`, 'x-maton-machine-id':machineId};
+    assert.equal((await fetch(`${baseUrl}/api/account`, {headers:expiredHeaders})).status, 401);
+    assert.equal((await fetch(`${baseUrl}/api/reviews/apps/org.example.app?mine=1`, {headers:expiredHeaders})).status, 401);
     assert.equal(created.status, 201);
     const fails = await Promise.all(Array.from({length:5}, () => request('/api/account/login', {username:'nobody',password:'wrong-password'}, {'x-real-ip':'198.51.100.50'})));
     assert.ok(fails.every((response) => response.status === 401));
@@ -252,27 +257,76 @@ describe('OTA API', () => {
   });
 
   it('reports unavailable password reset when mail transport is not configured', async () => {
-    delete process.env.OTA_SMTP_URL; delete process.env.OTA_MAIL_FROM;
+    delete process.env.MATON_SERVER_SMTP_URL; delete process.env.MATON_SERVER_MAIL_FROM;
     const response = await request('/api/account/reset', { email:'nobody@example.org' });
     assert.equal(response.status, 503);
     assert.equal((await response.json()).error, 'mail_not_configured');
   });
 
-  it('normalizes offensive text while preserving word boundaries and rejects links', async () => {
-    const { textRejected, spamText } = await import('../src/abuse.ts');
-    assert.equal(await textRejected('f.u.c.k'), true);
-    assert.equal(await textRejected('f u c k'), true);
-    assert.equal(await textRejected('sh1t'), true);
-    assert.equal(await textRejected('fuuuuuck'), true);
-    for (const safe of ['Scunthorpe', 'classic', 'assessment', 'cockpit']) assert.equal(await textRejected(safe), false, safe);
+  it('rejects review links while leaving word filtering omitted', async () => {
+    const { spamText } = await import('../src/abuse.ts');
     assert.equal(spamText('See https://example.org'), true);
     assert.equal(spamText('mail me at a@example.org'), true);
+    assert.equal(spamText('A useful review without a link.'), false);
+  });
+
+  it('issues one-hour access JWTs and rotates month-long refresh tokens with stable device identity', async () => {
+    const { database, jwtSecret } = await import('../src/database.ts');
+    const { createHash } = await import('node:crypto');
+    const { jwtVerify } = await import('jose');
+    const db = await database(), machineId = 'refresh-machine';
+    const login = await request('/api/account/register', { username:'Refresh_User', email:'refresh@example.org', password:'a-long-password-3', device_name:'Refresh PC' }, {'x-maton-machine-id':machineId});
+    assert.equal(login.status, 201);
+    const first = await login.json() as any;
+    assert.match(first.refresh_token, /^[A-Za-z0-9_-]{43}$/);
+    const cookies = login.headers.getSetCookie();
+    assert.ok(cookies.some((v) => v.startsWith('maton_session=') && v.includes('Max-Age=3600')));
+    assert.ok(cookies.some((v) => v.startsWith('maton_refresh=') && v.includes('Path=/api/account/refresh') && v.includes('HttpOnly') && v.includes('Secure') && v.includes('SameSite=Strict')));
+    const original = (await jwtVerify(first.token, new Uint8Array(await jwtSecret()))).payload;
+    assert.ok(Number(original.exp) - Math.floor(Date.now()/1000) <= 3600);
+    const row = db.prepare('SELECT * FROM devices WHERE jti=?').get(original.jti) as any;
+    assert.equal(row.refresh_hash, createHash('sha256').update(first.refresh_token).digest('hex'));
+    assert.equal(row.prev_refresh_hash, null);
+    assert.equal(row.refresh_expires - row.last_refreshed, 30 * 86400_000);
+    const refreshed = await fetch(`${baseUrl}/api/account/refresh`, {method:'POST', headers:{cookie:`maton_refresh=${first.refresh_token}`, 'x-maton-machine-id':machineId}});
+    assert.equal(refreshed.status, 200);
+    const second = await refreshed.json() as any;
+    assert.notEqual(second.refresh_token, first.refresh_token);
+    const rotated = (await jwtVerify(second.token, new Uint8Array(await jwtSecret()))).payload;
+    assert.equal(rotated.jti, original.jti); assert.equal(rotated.mid, original.mid);
+    const updated = db.prepare('SELECT * FROM devices WHERE jti=?').get(original.jti) as any;
+    assert.equal(updated.prev_refresh_hash, createHash('sha256').update(first.refresh_token).digest('hex'));
+    assert.equal(updated.refresh_hash, createHash('sha256').update(second.refresh_token).digest('hex'));
+    assert.ok(updated.last_refreshed >= row.last_refreshed);
+    const reused = await request('/api/account/refresh', {refresh_token:first.refresh_token}, {'x-maton-machine-id':machineId});
+    assert.equal(reused.status, 401);
+    assert.equal(db.prepare('SELECT count(*) AS n FROM devices WHERE jti=?').get(original.jti)?.n, 0);
+  });
+
+  it('rejects refresh tokens for the wrong machine, expired tokens, and removed devices', async () => {
+    const { database } = await import('../src/database.ts');
+    const db = await database(), machineId = 'refresh-failure-machine';
+    const create = async (name:string) => {
+      const response = await request('/api/account/register', {username:name, email:`${name.toLowerCase()}@example.org`, password:'a-long-password-4'}, {'x-maton-machine-id':machineId});
+      assert.equal(response.status, 201);
+      const body = await response.json() as any;
+      const row = db.prepare('SELECT jti FROM devices WHERE refresh_hash=?').get((await import('node:crypto')).createHash('sha256').update(body.refresh_token).digest('hex')) as any;
+      return { token:body.refresh_token, jti:row.jti };
+    };
+    const wrongMachine = await create('Wrong_Machine');
+    assert.equal((await request('/api/account/refresh', {refresh_token:wrongMachine.token}, {'x-maton-machine-id':'another-machine'})).status, 401);
+    const expired = await create('Expired_Refresh');
+    db.prepare('UPDATE devices SET refresh_expires=? WHERE jti=?').run(Date.now() - 1, expired.jti);
+    assert.equal((await request('/api/account/refresh', {refresh_token:expired.token}, {'x-maton-machine-id':machineId})).status, 401);
+    const removed = await create('Removed_Device');
+    db.prepare('DELETE FROM devices WHERE jti=?').run(removed.jti);
+    assert.equal((await request('/api/account/refresh', {refresh_token:removed.token}, {'x-maton-machine-id':machineId})).status, 401);
   });
 
   it('refuses promotion to a lower Android base', () => {
     const source = new URL('../src/promote.ts', import.meta.url);
     const result = spawnSync(process.execPath, [source.pathname, 'testing', '102'], {
-      env: { ...process.env, OTA_CONFIG: configPath, OTA_STORAGE_DIR: storage }, encoding: 'utf8'
+      env: { ...process.env, MATON_SERVER_CONFIG: configPath, MATON_SERVER_STORAGE_DIR: storage }, encoding: 'utf8'
     });
     assert.notEqual(result.status, 0);
     assert.match(result.stderr, /refusing Android base downgrade/);
@@ -281,7 +335,7 @@ describe('OTA API', () => {
   it('allows promotion in either direction on the same Android base', async () => {
     const source = new URL('../src/promote.ts', import.meta.url);
     const result = spawnSync(process.execPath, [source.pathname, 'main', '101'], {
-      env: { ...process.env, OTA_CONFIG: configPath, OTA_STORAGE_DIR: storage }, encoding: 'utf8'
+      env: { ...process.env, MATON_SERVER_CONFIG: configPath, MATON_SERVER_STORAGE_DIR: storage }, encoding: 'utf8'
     });
     assert.equal(result.status, 0, result.stderr);
     const config = JSON.parse(await readFile(configPath, 'utf8'));

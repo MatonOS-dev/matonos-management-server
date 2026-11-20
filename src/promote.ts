@@ -1,9 +1,10 @@
+// SPDX-License-Identifier: GPL-2.0-only
 import { promises as fs } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 
 const [channel, updateId] = process.argv.slice(2);
-const configPath = process.env.OTA_CONFIG;
-const storageDir = process.env.OTA_STORAGE_DIR;
+const configPath = process.env.MATON_SERVER_CONFIG;
+const storageDir = process.env.MATON_SERVER_STORAGE_DIR;
 const channelPattern = /^[a-z0-9_]+$/;
 const updatePattern = /^[1-9][0-9]{0,19}$/;
 
@@ -11,7 +12,7 @@ async function main() {
   if (!channel || !updateId || process.argv.length !== 4 || !channelPattern.test(channel) || !updatePattern.test(updateId)) {
     throw new Error('usage: node src/promote.ts <channel> <update_id>');
   }
-  if (!configPath || !storageDir) throw new Error('OTA_CONFIG and OTA_STORAGE_DIR are required');
+  if (!configPath || !storageDir) throw new Error('MATON_SERVER_CONFIG and MATON_SERVER_STORAGE_DIR are required');
   const config = JSON.parse(await fs.readFile(configPath, 'utf8'));
   const manifest = JSON.parse(await fs.readFile(resolve(storageDir, updateId, 'manifest.json'), 'utf8'));
   if (String(manifest?.build?.id) !== updateId || !Number.isSafeInteger(manifest?.build?.android_base) || manifest.build.android_base <= 0) {
@@ -33,6 +34,6 @@ async function main() {
 }
 
 main().catch((error) => {
-  process.stderr.write(`ota-server promote: ERROR: ${error.message}\n`);
+  process.stderr.write(`matonos-management-server promote: ERROR: ${error.message}\n`);
   process.exitCode = 1;
 });

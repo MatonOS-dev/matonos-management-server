@@ -1,24 +1,29 @@
+// SPDX-License-Identifier: GPL-2.0-only
 import { createHash, randomUUID, randomBytes, scrypt as scryptCb, timingSafeEqual } from 'node:crypto';
 import { promisify } from 'node:util';
 import { SignJWT, jwtVerify } from 'jose';
 import { database, jwtSecret } from './database.ts';
-import { textRejected, spamText } from './abuse.ts';
+import { spamText } from './abuse.ts';
 
 const scrypt = promisify(scryptCb);
 const SCRYPT = { N:16384, r:8, p:1, maxmem:64 * 1024 * 1024 };
-const SESSION_MS = 30 * 86400_000;
+const REFRESH_MS = 30 * 86400_000;
 const USERNAME = /^[A-Za-z0-9_.-]{3,32}$/;
 const EMAIL = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const hash = (v: string) => createHash('sha256').update(v).digest('hex');
-const cookie = (token: string, maxAge = 30 * 86400) => `maton_session=${token}; Path=/api; HttpOnly; Secure; SameSite=Strict; Max-Age=${maxAge}`;
+const cookie = (token: string, maxAge = 3600) => `maton_session=${token}; Path=/api; HttpOnly; Secure; SameSite=Strict; Max-Age=${maxAge}`;
+const refreshCookie = (token: string, maxAge = 30 * 86400) => `maton_refresh=${token}; Path=/api/account/refresh; HttpOnly; Secure; SameSite=Strict; Max-Age=${maxAge}`;
 
 function fail(status: number, code: string, message: string): never { throw Object.assign(new Error(message), { status, code }); }
 function bodyObject(v: any) { if (!v || typeof v !== 'object' || Array.isArray(v)) fail(400, 'invalid_body', 'Expected a JSON object'); return v; }
 function decoded(value:string) { try { return decodeURIComponent(value); } catch { fail(400, 'invalid_path', 'Path component is not valid URL encoding'); } }
-async function send(req: any, res: any, status: number, data: unknown, token?: string | null) {
+async function send(req: any, res: any, status: number, data: unknown, token?: string | null, refresh?: string | null) {
   const payload = Buffer.from(`${JSON.stringify(data)}\n`);
-  const headers: Record<string, string | number> = { 'Content-Type':'application/json; charset=utf-8', 'Content-Length':payload.length, 'Cache-Control':'no-store' };
-  if (token !== undefined) headers['Set-Cookie'] = token ? cookie(token) : cookie('', 0);
+  const headers: Record<string, string | number | string[]> = { 'Content-Type':'application/json; charset=utf-8', 'Content-Length':payload.length, 'Cache-Control':'no-store' };
+  const cookies: string[] = [];
+  if (token !== undefined) cookies.push(token ? cookie(token) : cookie('', 0));
+  if (refresh !== undefined) cookies.push(refresh ? refreshCookie(refresh) : refreshCookie('', 0));
+  if (cookies.length) headers['Set-Cookie'] = cookies;
   res.writeHead(status, headers); res.end(payload);
 }
 async function readBody(req: any) {
@@ -30,19 +35,54 @@ function machineId(req: any) { const id = req.headers['x-maton-machine-id']; if 
 function deviceName(body: any) { return String(body.device_name ?? 'This device').slice(0, 120); }
 async function createSession(accountId: string, req: any, name: string) {
   const db = await database(), jti = randomUUID(), mid = hash(`${machineId(req)}${jti}`), now = Date.now();
-  db.prepare('INSERT INTO devices(jti,account_id,mid,name,created,last_seen) VALUES(?,?,?,?,?,?)').run(jti, accountId, mid, name, now, now);
+  const refresh = randomBytes(32).toString('base64url');
+  db.prepare('INSERT INTO devices(jti,account_id,mid,name,created,last_seen,refresh_hash,refresh_expires,last_refreshed) VALUES(?,?,?,?,?,?,?,?,?)').run(jti, accountId, mid, name, now, now, hash(refresh), now + REFRESH_MS, now);
   const secret = await jwtSecret();
-  const token = await new SignJWT({ mid }).setProtectedHeader({ alg:'HS256' }).setSubject(accountId).setJti(jti).setIssuedAt().setExpirationTime('30d').sign(new Uint8Array(secret));
-  return token;
+  const token = await new SignJWT({ mid }).setProtectedHeader({ alg:'HS256' }).setSubject(accountId).setJti(jti).setIssuedAt().setExpirationTime('1h').sign(new Uint8Array(secret));
+  return { token, refresh_token:refresh };
+}
+
+function cookieValue(req: any, name: string) {
+  return String(req.headers.cookie ?? '').split(';').map((v: string) => v.trim()).find((v) => v.startsWith(`${name}=`))?.slice(name.length + 1);
+}
+
+async function refreshSession(req: any, res: any) {
+  const refreshCookieValue = cookieValue(req, 'maton_refresh');
+  const hasBody = Number(req.headers['content-length'] ?? 0) > 0 || req.headers['transfer-encoding'] !== undefined;
+  const body = hasBody || !refreshCookieValue ? await readBody(req) : {};
+  const supplied = typeof body.refresh_token === 'string' ? body.refresh_token : refreshCookieValue;
+  if (!supplied || supplied.length > 256) fail(401, 'unauthorized', 'Refresh token is missing or invalid');
+  const db = await database(), tokenHash = hash(supplied), row = db.prepare('SELECT * FROM devices WHERE refresh_hash=? OR prev_refresh_hash=?').get(tokenHash, tokenHash) as any;
+  if (!row) fail(401, 'unauthorized', 'Refresh token is expired or invalid');
+  if (row.prev_refresh_hash === tokenHash) {
+    db.prepare('DELETE FROM devices WHERE jti=?').run(row.jti);
+    fail(401, 'unauthorized', 'Refresh token reuse revoked this device');
+  }
+  const now = Date.now(), mid = hash(`${machineId(req)}${row.jti}`);
+  if (!row.refresh_expires || row.refresh_expires <= now || row.mid !== mid) fail(401, 'unauthorized', 'Refresh token is expired or invalid');
+  const refresh = randomBytes(32).toString('base64url'), secret = await jwtSecret();
+  const token = await new SignJWT({ mid:row.mid }).setProtectedHeader({ alg:'HS256' }).setSubject(row.account_id).setJti(row.jti).setIssuedAt().setExpirationTime('1h').sign(new Uint8Array(secret));
+  db.exec('BEGIN IMMEDIATE');
+  try {
+    const updated = db.prepare('UPDATE devices SET prev_refresh_hash=refresh_hash,refresh_hash=?,refresh_expires=?,last_refreshed=?,last_seen=? WHERE jti=? AND refresh_hash=?').run(hash(refresh), now + REFRESH_MS, now, now, row.jti, tokenHash);
+    if (updated.changes !== 1) {
+      const current = db.prepare('SELECT prev_refresh_hash FROM devices WHERE jti=?').get(row.jti) as any;
+      if (current?.prev_refresh_hash === tokenHash) db.prepare('DELETE FROM devices WHERE jti=?').run(row.jti);
+      db.exec('COMMIT');
+      fail(401, 'unauthorized', 'Refresh token was already used');
+    }
+    db.exec('COMMIT');
+  } catch (error) { try { db.exec('ROLLBACK'); } catch {} throw error; }
+  return send(req, res, 200, { token, refresh_token:refresh }, token, refresh);
 }
 async function mailToken(email: string, kind: string, accountId: string) {
   const token = randomBytes(32).toString('base64url'), now = Date.now();
   const db = await database();
   db.prepare('INSERT INTO reset_tokens(token_hash,account_id,kind,expires,created) VALUES(?,?,?,?,?)').run(hash(token), accountId, kind, now + 3600_000, now);
-  if (!process.env.OTA_SMTP_URL || !process.env.OTA_MAIL_FROM) return;
+  if (!process.env.MATON_SERVER_SMTP_URL || !process.env.MATON_SERVER_MAIL_FROM) return;
   const nodemailer = (await import('nodemailer')).default;
-  const transport = nodemailer.createTransport(process.env.OTA_SMTP_URL);
-  await transport.sendMail({ from:process.env.OTA_MAIL_FROM, to:email, subject:kind === 'verify' ? 'Verify your MatonOS account' : 'Reset your MatonOS password', text:`Use this one-time token within one hour: ${token}` });
+  const transport = nodemailer.createTransport(process.env.MATON_SERVER_SMTP_URL);
+  await transport.sendMail({ from:process.env.MATON_SERVER_MAIL_FROM, to:email, subject:kind === 'verify' ? 'Verify your MatonOS account' : 'Reset your MatonOS password', text:`Use this one-time token within one hour: ${token}` });
 }
 async function passwordRecord(password:string, salt:string) {
   const derived = await scrypt(password, salt, 64, SCRYPT) as Buffer;
@@ -87,15 +127,15 @@ export async function handleAccountReviewApi(req: any, res: any, path: string, u
       const b = await readBody(req);
       if (typeof b.username !== 'string' || typeof b.email !== 'string' || typeof b.password !== 'string') fail(400, 'invalid_account', 'Username, e-mail and password are required');
       const username = b.username, email = b.email.trim(), password = b.password;
-      if (!USERNAME.test(username) || await textRejected(username)) fail(400, 'invalid_username', 'Username must be 3–32 allowed characters');
+      if (!USERNAME.test(username)) fail(400, 'invalid_username', 'Username must be 3–32 allowed characters');
       if (!EMAIL.test(email) || email.length > 254) fail(400, 'invalid_email', 'E-mail address is invalid');
       if (password.length < 10 || password.length > 1024) fail(400, 'invalid_password', 'Password must be at least 10 characters');
       const id = randomUUID(), record = await passwordRecord(password, id);
       try { db.prepare('INSERT INTO accounts(id,username,email,password_hash,created) VALUES(?,?,?,?,?)').run(id, username, email, record, Date.now()); }
       catch { fail(409, 'account_exists', 'Username or e-mail is already registered'); }
-      if (process.env.OTA_SMTP_URL && process.env.OTA_MAIL_FROM) await mailToken(email, 'verify', id);
+      if (process.env.MATON_SERVER_SMTP_URL && process.env.MATON_SERVER_MAIL_FROM) await mailToken(email, 'verify', id);
       const token = await createSession(id, req, deviceName(b));
-      return send(req, res, 201, { username, verified:false, token }, token);
+      return send(req, res, 201, { username, verified:false, ...token }, token.token, token.refresh_token);
     }
     if (path === '/api/account/login' && req.method === 'POST') {
       const b = await readBody(req), username = typeof b.username === 'string' ? b.username : '', password = typeof b.password === 'string' ? b.password : '', row = db.prepare('SELECT * FROM accounts WHERE username=? COLLATE NOCASE').get(username) as any;
@@ -104,11 +144,12 @@ export async function handleAccountReviewApi(req: any, res: any, path: string, u
       await rateLogin(req, username, ok);
       if (!ok) fail(401, 'invalid_credentials', 'Wrong username or password');
       const token = await createSession(row.id, req, deviceName(b));
-      return send(req, res, 200, { username:row.username, verified:Boolean(row.verified), token }, token);
+      return send(req, res, 200, { username:row.username, verified:Boolean(row.verified), ...token }, token.token, token.refresh_token);
     }
+    if (path === '/api/account/refresh' && req.method === 'POST') return refreshSession(req, res);
     if (path === '/api/account/logout' && req.method === 'POST') {
       const me = await account(req); db.prepare('DELETE FROM devices WHERE jti=?').run(me.jti);
-      return send(req, res, 200, { ok:true }, null);
+      return send(req, res, 200, { ok:true }, null, null);
     }
     if (path === '/api/account' && req.method === 'GET') {
       const me = await account(req); return send(req, res, 200, { username:me.username, email:me.email, verified:Boolean(me.verified) });
@@ -117,10 +158,10 @@ export async function handleAccountReviewApi(req: any, res: any, path: string, u
       const me = await account(req), b = await readBody(req), stored = db.prepare('SELECT password_hash FROM accounts WHERE id=?').get(me.id)?.password_hash as string;
       if (!await passwordMatches(String(b.password ?? ''), me.id, stored)) fail(401, 'invalid_credentials', 'Wrong username or password');
       db.exec('BEGIN IMMEDIATE'); try { db.prepare('DELETE FROM accounts WHERE id=?').run(me.id); db.exec('COMMIT'); } catch (e) { db.exec('ROLLBACK'); throw e; }
-      return send(req, res, 200, { ok:true }, null);
+      return send(req, res, 200, { ok:true }, null, null);
     }
     if (path === '/api/account/devices' && req.method === 'GET') {
-      const me = await account(req), rows = db.prepare('SELECT jti AS id,name,created,last_seen FROM devices WHERE account_id=? ORDER BY created DESC').all(me.id);
+      const me = await account(req), rows = db.prepare('SELECT jti AS id,name,created,last_refreshed FROM devices WHERE account_id=? ORDER BY created DESC').all(me.id);
       return send(req, res, 200, rows.map((v: any) => ({ ...v, current:v.id === me.jti })));
     }
     const deviceMatch = /^\/api\/account\/devices\/([^/]+)$/.exec(path);
@@ -131,7 +172,7 @@ export async function handleAccountReviewApi(req: any, res: any, path: string, u
       db.prepare('UPDATE accounts SET verified=1 WHERE id=?').run(row.account_id); db.prepare('DELETE FROM reset_tokens WHERE token_hash=?').run(hash(token)); return send(req, res, 200, { ok:true });
     }
     if (path === '/api/account/reset' && req.method === 'POST') {
-      if (!process.env.OTA_SMTP_URL || !process.env.OTA_MAIL_FROM) fail(503, 'mail_not_configured', 'mail not configured');
+      if (!process.env.MATON_SERVER_SMTP_URL || !process.env.MATON_SERVER_MAIL_FROM) fail(503, 'mail_not_configured', 'mail not configured');
       const b = await readBody(req), email = String(b.email ?? ''), row = db.prepare('SELECT id,email FROM accounts WHERE email=? COLLATE NOCASE').get(email) as any;
       if (row) await mailToken(row.email, 'reset', row.id);
       return send(req, res, 200, { ok:true });
@@ -189,7 +230,6 @@ export async function handleAccountReviewApi(req: any, res: any, path: string, u
       if (!Number.isInteger(stars) || stars < 1 || stars > 5) fail(400, 'invalid_stars', 'stars must be an integer from 1 to 5');
       if (title.length > 80 || body.length > 2000 || (!title.trim() && !body.trim())) fail(400, 'invalid_review', 'Review title or body is invalid');
       if (spamText(title) || spamText(body)) fail(422, 'text_rejected', 'Review text is not allowed');
-      if (await textRejected(`${title}\n${body}`)) fail(422, 'text_rejected', 'Review text is not allowed');
       const now = Date.now(); db.prepare('INSERT INTO reviews(app,account_id,stars,title,body,created,updated) VALUES(?,?,?,?,?,?,?) ON CONFLICT(app,account_id) DO UPDATE SET stars=excluded.stars,title=excluded.title,body=excluded.body,updated=excluded.updated').run(app, me.id, stars, title.trim(), body.trim(), now, now);
       return send(req, res, 200, { ok:true });
     }
